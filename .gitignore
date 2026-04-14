@@ -1,0 +1,7 @@
+.vs
+.idea
+*.suo
+*.zip
+packages
+client/bin
+client/obj

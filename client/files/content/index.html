@@ -1,0 +1,178 @@
+<html> 
+<head> 
+    <title>The Settlers Online</title> 
+    <link rel="stylesheet" href="bootstrap.min.css">
+	<script type="text/javascript" src="AIRAliases.js"></script><!-- AIR -->
+	<script type="text/javascript" src="AIRMenuBuilder.js"></script><!-- AIR -->
+    <script  type="text/javascript" src="jquery.min.js"></script>
+    <script type="application/x-shockwave-flash" src="library.swf"></script>
+    <script  type="text/javascript" src="bootstrap.min.js"></script>
+	<script type="text/javascript" src="jquery-ui.min.js"></script>
+	<script type="text/javascript" src="lru_cache.js"></script>
+	<script type="text/javascript"> 
+
+		var swmmo,loca,assets,notifications,notificationManager,globalFlash,gameLang,loadInterval,loadInterval2,game,menu,utils,rawArgs,dropbox,version = null,
+			dtf=new window.runtime.flash.globalization.DateTimeFormatter("en-US"),expZone=null,expAuth,expFlex,settings,settingsFile="settings.json",isDebug=!1,dropboxApiKey,dropboxApiRefresh;
+
+		window.onload = function(){ 
+		   var loader = new air.Loader(); 
+		   loader.contentLoaderInfo.addEventListener(air.Event.COMPLETE, loadCompleteHandler)
+		   loader.load(new air.URLRequest("client.swf"));
+		   window.nativeWindow.stage.getChildAt(0).paintsDefaultBackground=false;
+		}
+
+		function runNewApplication(flexid, randomauth, zoneid)
+		{
+			updateApplication();
+			var nativeProcessStartupInfo = new window.runtime.flash.desktop.NativeProcessStartupInfo();
+			var file = air.File.applicationDirectory.resolvePath(window.runtime.flash.system.Capabilities.cpuAddressSize == 32 ? "client.exe" : "client64.exe");
+			nativeProcessStartupInfo.executable = file;
+			var processArgs = new window.runtime.Vector["<String>"]();
+			rawArgs["window"] = mainSettings.mwWindowSize == 'same' ? rawArgs["window"] : mainSettings.mwWindowSize;
+			$.extend(rawArgs, { "flexid": flexid, "authrandom": randomauth, "zoneid": zoneid });
+			processArgs[0] = "tso://?" + Object.keys(rawArgs).map(function(k) { return "{0}={1}".format(k, rawArgs[k]); }).join('&');
+			nativeProcessStartupInfo.arguments = processArgs;
+			process = new window.runtime.flash.desktop.NativeProcess();
+			process.start(nativeProcessStartupInfo);
+		}
+		
+		function updateApplication()
+		{
+			var file = new air.File("file:///" + air.File.applicationDirectory.resolvePath("META-INF/AIR/application.xml").nativePath);
+			var fileStream = new air.FileStream();
+			fileStream.open(file, air.FileMode.UPDATE);
+			var data = fileStream.readUTFBytes(file.size);
+			var re = new RegExp('<id>TSO-(.+)</id>',"gi");
+			data = data.replace(re, '<id>TSO-'+makeNewTSOid(5)+'</id>');
+			fileStream.position = 0;
+			fileStream.truncate();
+			fileStream.writeUTFBytes(data);
+			fileStream.close();
+		}
+
+		function makeNewTSOid(length)
+		{
+			var result = '';
+			const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+			for(i = 0; i < length; i++) {
+				result += characters.charAt(Math.floor(Math.random() * 26));
+			}
+			return result;
+		}
+		
+		function loadNotificationsHandler(event)
+		{
+			notifications = event.target.content;
+			window.nativeWindow.stage.addChild( notifications ); 
+			loadInterval2 = setInterval(function(){
+				if(notifications.application != null) {
+					clearInterval(loadInterval2);
+					for(i = 0; i< window.nativeWindow.stage.numChildren; i++){
+						if(window.nativeWindow.stage.getChildAt(i).currentLabel == "Main") {
+							window.nativeWindow.stage.removeChildAt(i);
+							var notificationManagerDef = notifications.getDefinitionByName("com.charlesbihis.engine.notification::NotificationManager");
+							notificationManager = new notificationManagerDef("images/dark.swf", "images/Icon2.png", "images/Icon4.png", "images/drop.mp3", 2, "auto");
+							break;
+						}
+					}
+				}
+			}, 100);
+		}
+		
+		function loadCompleteHandler(event)
+		{
+		  swmmo = event.target.content;
+		  window.nativeWindow.stage.addChild( swmmo ); 
+		  var loader = new air.Loader(); 
+		  loader.contentLoaderInfo.addEventListener(air.Event.COMPLETE, loadNotificationsHandler)
+		  loader.load(new air.URLRequest("toast.swf"));
+		  window.nativeWindow.stage.addEventListener(air.Event.RESIZE, onResize);
+		  window.nativeWindow.addEventListener("displayStateChange", onResize);
+		  window.nativeWindow.stage.addEventListener(window.runtime.flash.events.KeyboardEvent.KEY_DOWN, stageKeyDownListener);
+		  air.NativeApplication.nativeApplication.addEventListener("invoke", function(event) {
+			var p = rawArgs = parseParam(event.arguments[0].replace("tso://", ""));
+			if(p["window"] && p["window"] == "fullscreen") { window.nativeWindow.stage.displayState = "fullScreenInteractive"; }
+			if(p["window"] && p["window"] == "maximized") { window.nativeWindow.maximize(); }
+			if(p["window"] && p["window"] == "minimized") { window.nativeWindow.minimize(); }
+			if(p["debug"]) { isDebug = true; }
+			if(p["version"]) { version = p["version"]; }
+			if(p["clientconfig"]) { settingsFile = unescape(p["clientconfig"]); }
+			if(p["authrandom"]) { expAuth = p["authrandom"]; }
+			if(p["flexid"]) { expFlex = p["flexid"]; }
+			if(p["zoneid"]) { expZone = p["zoneid"]; }
+			if(p["dropboxApiKey"]) { dropboxApiKey = decodeURIComponent(p["dropboxApiKey"]); }
+			if(p["dropboxApiRefresh"]) { dropboxApiRefresh = decodeURIComponent(p["dropboxApiRefresh"]); }
+			convertSettings();
+		  });
+		  loadInterval = setInterval(function(){ 
+		    try {
+				if(expZone != null) {
+				  swmmo.getDefinitionByName("defines").CLIENT_AUTHRANDOM = expAuth;
+				  swmmo.getDefinitionByName("mx.messaging::FlexClient").getInstance().id = expFlex;
+				  swmmo.getDefinitionByName("defines").CLIENT_ZONEID = expZone;
+				}
+			} catch(e) {}
+			if(!swmmo.getDefinitionByName("globalFlash").gui.GetDefaultGuiElementsLoaded()) { return; }
+			loca = swmmo.getDefinitionByName("GUI.Loca::cLocaManager").GetInstance();
+			assets = swmmo.getDefinitionByName("GUI.Assets::gAssetManager");
+			globalFlash = swmmo.getDefinitionByName("globalFlash");
+			if(expZone != null) {
+				swmmo.application.GAMESTATE_ID_ACTIONBAR.actionBarCenter.getChildByName("toggleFrindsList").visible = false;
+				swmmo.application.GAMESTATE_ID_ACTIONBAR.setConstraintValue("bottom", 0);
+				for(i = 0; i < swmmo.application.GAMESTATE_ID_ACTIONBAR.actionBarLeft.numChildren; i++) { swmmo.application.GAMESTATE_ID_ACTIONBAR.actionBarLeft.getChildAt(i).visible = false;	}
+				for(i = 0; i < swmmo.application.GAMESTATE_ID_ACTIONBAR.actionBarRight.numChildren; i++) { swmmo.application.GAMESTATE_ID_ACTIONBAR.actionBarRight.getChildAt(i).visible = false; }
+				for(i = 0; i < swmmo.application.GAMESTATE_ID_AVATAR.numChildren; i++) { swmmo.application.GAMESTATE_ID_AVATAR.getChildAt(i).visible = false; }
+				swmmo.application.GAMESTATE_ID_AVATAR.getChildByName("btnQuestBook").visible = true;
+				swmmo.application.GAMESTATE_ID_AVATAR.getChildByName("btnQuestBook").setConstraintValue("right", 110);
+				swmmo.application.GAMESTATE_ID_AVATAR.getChildByName("btnQuestBook").setConstraintValue("left", 7);
+				swmmo.application.GAMESTATE_ID_AVATAR.getChildByName("btnQuestBook").setConstraintValue("bottom", 700);
+				swmmo.application.GAMESTATE_ID_AVATAR.getChildByName("btnQuestBook").setConstraintValue("top", 4);
+				globalFlash.gui.mQuestHintPointer.GetGUIElement().setConstraintValue("top", 10);
+				globalFlash.gui.mQuestHintPointer.GetGUIElement().setConstraintValue("left", 75);
+			}
+			alertItem = swmmo.getDefinitionByName("GUI.Components.ItemRenderer::AvatarMessageItemRenderer");
+			gameLang = combineSameLang(loca.getSelectedLanguage());
+			game = new Game(swmmo.application.mGameInterface, swmmo.getDefinitionByName("global").gameworld);
+			if(game.gi.IsAdventureZoneID(game.gi.mCurrentViewedZoneID)) {
+				document.title += ' (' + game.gw + ') - ' + loca.GetText("ADN", game.playerName.replace("_" + game.gi.mCurrentViewedZoneID, ""));
+			} else {
+				document.title += ' (' + game.gw + ') - ' + game.playerName;
+			}
+			clearInterval(loadInterval);
+			air.File.applicationDirectory.resolvePath("scripts").getDirectoryListing().forEach(function(item) {
+				$('head').append($("<script>").attr({ "src": "scripts/" + item.name, "type": "text/javascript"}));
+			});
+			if(isDebug) { 
+				$('head').append($("<script>").attr({ "src": "AIRIntrospector.js", "type": "text/javascript"}));
+				setTimeout(function(){ air.Introspector.toggleWindow(); }, 5000);
+			}
+		  }, 2000);
+		}
+		function stageKeyDownListener(event) { try{ menu.checkKeybind(event); } catch(e){} }
+		function convertSettings(){var e=new air.File("file:///"+air.File.applicationDirectory.resolvePath(settingsFile).nativePath);if(e.exists){var t=new air.FileStream;try{t.open(e,"read");var i=t.readUTFBytes(1);"{"!=i&&(t.position=0,i=JSON.parse(t.readUTF()),t.close(),t.open(e,"write"),t.writeUTFBytes(JSON.stringify(i,null,"  "))),t.close()}catch(r){}}}
+		function combineSameLang(e){return 0==e.indexOf("en")?"en-uk":0==e.indexOf("es")?"es-es":e}
+		function parseParam(n){var t={};return n.replace(/[?&]+([^=&]+)=([^&]*)/gi,function(n,e,r){t[e]=r}),t}
+		function onResize(event) { swmmo.setActualSize(window.nativeWindow.stage.stageWidth, window.nativeWindow.stage.stageHeight); }
+		var Game=function(e,g){this.gi=e,this.gw=g,this.playerName=e.mHomePlayer.GetPlayerName_string(),this.player=e.mCurrentPlayer,this.zone=e.mCurrentPlayerZone,this.quests=e.mNewQuestManager,this.trackers={},this.questCallbacks=e.mQuestClientCallbacks};Game.prototype={def:function(e,t){var n=swmmo.getDefinitionByName(e);return t?new n:n},chatMessage:function(e,t){t=t||"main",globalFlash.gui.mChatPanel.PutMessageToChannelWithoutServer("news",new window.runtime.Date,"Client [{0}]".format(t),e,!1,!1)},getBuildings:function(e){if((e=e||1)>5)return null;try{return this.zone.mStreetDataMap.GetBuildings_vector()}catch(t){return this.getBuildings(++e)}},getSpecialists:function(e){if((e=e||1)>5)return null;try{return this.zone.GetSpecialists_vector()}catch(t){return this.getSpecialists(++e)}},getBuffs:function(e){if((e=e||1)>5)return null;try{return this.player.getAvailableBuffs_vector()}catch(t){return this.getBuffs(++e)}},getResources:function(e){if((e=e||1)>5)return null;try{return this.zone.GetResources(this.player)}catch(t){return this.getResources(++e)}},createResponder:function(e,t){return new(this.def("ServerState::ResponderSimple"))(e,t)},showAlert:function(e){var t=this.def("GUI.Components.ItemRenderer::AvatarMessageItemRenderer",!0);swmmo.getDefinitionByName("globalFlash").gui.mAvatarMessageList.mClientMessages.addChild(t),t.headlineLabel.text="Client",t.messageBody.text=e,t.image.source=assets.GetBitmap("1-Up.png")},getTracker:function(r,e){return this.trackers[r]||(this.trackers[r]=new window.runtime.ClientBuff,this.trackers[r].addEventListener("buffApply",e)),this.trackers[r]}};
+	</script>
+</head> 
+<body style="background-color:transparent;">
+	<div class="container">
+	  <!-- Modal -->
+	  <div class="modal fade" id="dummyModal" role="dialog">
+		<div class="modal-dialog modal-lg">
+		  <div class="modal-content">
+			<div class="modal-header">
+			  <h4 class="modal-title"></h4>
+			  <div class="templateFile" style="display:inline;"></div>
+			</div>
+			<div class="modal-body"></div>
+			<div class="modal-footer">
+			  <button type="button" class="btn btn-danger btnClose" data-dismiss="modal">Close</button>
+			</div>
+		  </div>
+		</div>
+	  </div>
+	</div>
+</body> 
+</html>
