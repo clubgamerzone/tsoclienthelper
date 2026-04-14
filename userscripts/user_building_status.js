@@ -13,18 +13,20 @@ var _bsSectionDefs = [
     {
         label:    'Weapons',
         patterns: ['WEAPON','SWORD','CROSSBOW','ARMORER','ARMOURER','BLACKSMITH','STEEL','BOW',
-                   'FLETCHER','KNIGHTSM','GUNSMITH','MUNITION','MORTAR','CANNON']
+                   'FLETCHER','KNIGHTSM','GUNSMITH','MUNITION','MORTAR','CANNON',
+                   'BARRACK','CARPENTER','COMBATACADEMY','STABLE','WHEELMAKER']
     },
     {
         label:    'Wood & Paper',
         patterns: ['WOODCUTTER','SAWMILL','FORESTER','CHARCOAL','LUMBERMILL','PAPERMILL',
-                   'WOODWORK','LUMBERJACK','BARKMILL']
+                   'WOODWORK','LUMBERJACK','BARKMILL','BOOKBINDER',
+                   'COKING','WOODYARD','FINESMITH','LETTERSMITH','ORNAMENTALSMITH','RECYCLING']
     },
     {
         label:    'Food & Farming',
         patterns: ['FARM','BAKER','BAKERY','WATERMILL','WATERWORK','WELL','SILO','BREWERY',
-                   'FISHERMAN','FISHINGCABIN','HUNTER','BUTCHER','SLAUGHTER','GRAIN','MILL',
-                   'PROVISION','WINDMILL']
+                   'FISH','FISHERMAN','FISHINGCABIN','HUNTER','BUTCHER','SLAUGHTER','GRAIN','MILL',
+                   'PROVISION','WINDMILL','DEERSTALKER']
     }
 ];
 
@@ -62,6 +64,7 @@ function _bsClassify(nameKey) {
     return 'Other';
 }
 
+
 // ---- Menu handler ----
 function _bsMenuHandler() {
     if (!(swmmo.application.mGameInterface.mCurrentPlayer.GetHomeZoneId() ==
@@ -77,9 +80,8 @@ function _bsMenuHandler() {
     try {
         if ($('#bsModal .modal-header .container-fluid').length === 0) {
 
-            // Inject styles once
             $('#bsStyle').remove();
-            $("head").append($("<style>", { id: 'bsStyle' }).text(
+            $("head").append($('<style>', { id: 'bsStyle' }).text(
                 '#bsModal div .row:hover { background-color: #A65329; }' +
                 '#bsModal .bs-upgrading { color: #ff5555; font-weight: bold; }' +
                 '#bsModal .bs-producing { color: #66cc66; }' +
@@ -95,25 +97,17 @@ function _bsMenuHandler() {
 
             createModalWindow('bsModal', 'Building Status');
 
-            // Column header row
             $('#bsModal .modal-header').append(
                 '<div class="container-fluid">' +
                 $('<button>').attr({ id: 'bsRefreshBtn', 'class': 'btn btn-success' })
                              .text('Refresh').prop('outerHTML') +
                 '&nbsp;&nbsp;' +
-
                 $('<button>').attr({ id: 'bsAutoBtn', 'class': 'btn btn-warning' })
                              .text('Auto Update: ON').prop('outerHTML') +
                 '&nbsp;&nbsp;<span id="bsTotalSpan" style="font-weight:bold;"></span>' +
                 createTableRow([
-                    [1, '#'],
-                    [2, 'Building'],
-                    [1, 'Lvl'],
-                    [1, 'Deposit'],
-                    [2, 'Status'],
-                    [2, 'Time Left'],
-                    [2, 'Storage'],
-                    [1, 'Buffed']
+                    [1, '#'], [2, 'Building'], [1, 'Lvl'], [1, 'Deposit'],
+                    [2, 'Status'], [2, 'Time Left'], [2, 'Storage'], [1, 'Buffed']
                 ], true) +
                 '</div>'
             );
@@ -126,7 +120,7 @@ function _bsMenuHandler() {
                        .toggleClass('btn-warning', _bsAutoUpdate)
                        .toggleClass('btn-default', !_bsAutoUpdate);
                 if (_bsAutoUpdate) {
-                    _bsRefresh(); // restart the interval
+                    _bsRefresh();
                 } else {
                     if (_bsRefreshInterval) {
                         clearInterval(_bsRefreshInterval);
@@ -135,12 +129,9 @@ function _bsMenuHandler() {
                 }
             });
 
-            // Make the modal draggable by its header
             $('#bsModal').on('shown.bs.modal', function () {
                 $('#bsModal .modal-dialog').draggable({ handle: '#bsModal .modal-header', containment: 'window' });
             });
-
-            // Stop the timer when the window is closed
             $('#bsModal').on('hidden.bs.modal', function () {
                 if (_bsRefreshInterval) {
                     clearInterval(_bsRefreshInterval);
@@ -165,7 +156,6 @@ function _bsRefresh() {
         _bsRenderData(groups);
     } catch (e) {}
 
-    // Auto-refresh every 30 s while the window is visible and auto-update is on
     if (_bsRefreshInterval) clearInterval(_bsRefreshInterval);
     if (_bsAutoUpdate) {
         _bsRefreshInterval = setInterval(function () {
@@ -196,7 +186,7 @@ function _bsGetData() {
     var streetMap  = zone.mStreetDataMap;
     var clientTime = gi.GetClientTime();
 
-    // Build deposit lookup: grid → deposit object
+    // Build deposit lookup: grid â†’ deposit object
     var depositMap = {};
     try {
         var depositArr = streetMap.mDepositContainer.mContainer;
@@ -237,8 +227,7 @@ function _bsGetData() {
             }
             var isMine  = deposit !== null;
 
-            // Apply skip list only to non-mine buildings
-            if (!isMine && _bsShouldSkip(nameKey, bld)) return;
+            if (_bsShouldSkip(nameKey, bld)) return;
             var statusCode       = 0;   // 0=idle 1=producing 2=buffed 3=upgrading
             var isUpgrading      = false;
             var upgProgress      = 0;
@@ -261,7 +250,7 @@ function _bsGetData() {
             // -- Production / buff check --
             try {
                 if (!isUpgrading) {
-                    statusCode = bld.IsProductionActive() ? 1 : 0;
+                    statusCode = (isMine || bld.IsProductionActive()) ? 1 : 0;
                 }
                 var buff = bld.productionBuff;
                 if (buff != null && buff.IsActive(clientTime)) {
@@ -270,7 +259,6 @@ function _bsGetData() {
                     if (buffRemainingMs > 0) {
                         buffEndStr = _bsFormatHMS(buffRemainingMs);
                         buffName   = loca.GetText("RES", buff.GetBuffDefinition().GetName_string());
-                        if (!isUpgrading) statusCode = 2;
                     }
                 }
             } catch (e) {}
@@ -300,7 +288,7 @@ function _bsGetData() {
             };
 
             // Timed production buildings (Bookbinder, Brewery, etc.) expose their
-            // queue so we can calculate exact remaining time — same formula as 6-timed.js
+            // queue so we can calculate exact remaining time â€” same formula as 6-timed.js
             if (!isMine) {
                 try {
                     var pq = bld.productionQueue;
@@ -335,7 +323,7 @@ function _bsGetData() {
 
                 // Depletion time (seconds) when mine is actively working
                 try {
-                    if (gEcon && bld.IsProductionActive()) {
+                    if (gEcon) {
                         var cycleMs      = bld.CalculateWays();
                         var cycleSecs    = cycleMs > 0 ? cycleMs / 1000 : 1;
                         var rcd          = gEcon.GetResourcesCreationDefinitionForBuilding(nameKey);
@@ -353,7 +341,10 @@ function _bsGetData() {
                     }
                 } catch (e) {}
 
-                mines.push(entry);
+                var mCat = _bsClassify(nameKey);
+                if      (mCat === 'Wood & Paper')   wood.push(entry);
+                else if (mCat === 'Food & Farming') food.push(entry);
+                else                                mines.push(entry);
             } else {
                 var cat = _bsClassify(nameKey);
                 if      (cat === 'Weapons')        weapons.push(entry);
@@ -440,31 +431,23 @@ function _bsRenderData(groups) {
 
             var statusLabel = '';
             var statusClass = '';
-            var timeLeft    = '—';
+            var timeLeft    = 'â€”';
 
             if (isExhausted) {
                 statusLabel = 'Exhausted';
                 statusClass = 'bs-exhausted';
-            } else switch (b.Status) {
-                case 3:
-                    statusLabel = 'UP ' + b.UpgProgress + '%';
-                    statusClass = 'bs-upgrading';
-                    timeLeft    = b.UpgradeRemaining > 0 ? _bsFormatHMS(b.UpgradeRemaining) : '—';
-                    break;
-                case 2:
-                    statusLabel = 'Buffed';
-                    statusClass = 'bs-buffed';
-                    if (b.IsMine && b.SecsToDeplete > 0) {
-                        timeLeft = _bsFormatHMS(b.SecsToDeplete * 1000);
-                    } else if (b.QueueRemainingMs > 0) {
-                        timeLeft = _bsFormatHMS(b.QueueRemainingMs);
-                    } else {
-                        timeLeft = b.BuffEnd || '—';
-                    }
-                    break;
-                case 1:
-                    statusLabel = 'Active';
-                    statusClass = 'bs-producing';
+            } else {
+                var parts   = [];
+                var classes = [];
+                var isIdle  = false;
+
+                if (b.IsUpgrading) {
+                    parts.push('UP ' + b.UpgProgress + '%');
+                    classes.push('bs-upgrading');
+                    timeLeft = b.UpgradeRemaining > 0 ? _bsFormatHMS(b.UpgradeRemaining) : 'â€”';
+                } else if (b.Status === 1) {
+                    parts.push('Active');
+                    classes.push('bs-producing');
                     if (b.IsMine && b.SecsToDeplete > 0) {
                         timeLeft = _bsFormatHMS(b.SecsToDeplete * 1000);
                     } else if (b.QueueRemainingMs > 0) {
@@ -472,22 +455,31 @@ function _bsRenderData(groups) {
                     } else if (b.CycleMs > 0) {
                         timeLeft = _bsFormatHMS(b.CycleMs) + '/cyc';
                     }
-                    break;
-                default:
-                    statusLabel = 'Idle';
-                    statusClass = 'bs-idle';
-                    break;
+                } else {
+                    parts.push('Idle');
+                    classes.push('bs-idle');
+                    isIdle = true;
+                }
+
+                if (b.BuffEnd) {
+                    parts.push('Buffed');
+                    classes.push('bs-buffed');
+                    if (isIdle) { timeLeft = b.BuffEnd; }
+                }
+
+                statusLabel = parts.join(' + ');
+                statusClass = classes[0];
             }
 
             var gotoIcon = getImageTag('accuracy.png', '20px', '20px')
                 .replace('<img', '<img id="bsGoto_' + b.Grid + '"')
                 .replace('style="', 'style="cursor:pointer;vertical-align:middle;');
 
-            var depositCell = b.IsMine ? b.DepositAmt.toLocaleString() : '—';
-            var storageCell = b.IsMine ? b.OreInStorage.toLocaleString() : '—';
+            var depositCell = b.IsMine ? b.DepositAmt.toLocaleString() : 'â€”';
+            var storageCell = b.IsMine ? b.OreInStorage.toLocaleString() : 'â€”';
             var buffCell    = b.BuffEnd
                 ? '<span class="bs-buffed" title="' + b.BuffName + '">' + b.BuffEnd + '</span>'
-                : '—';
+                : 'â€”';
 
             out += createTableRow([
                 [1, idx + '&nbsp;' + gotoIcon],

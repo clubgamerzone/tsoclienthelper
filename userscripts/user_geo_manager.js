@@ -24,7 +24,7 @@ var _gmDepositTask = {
     'Salpeter':    '0,8'
 };
 
-// Building type numbers for SendServerAction(50, ...) — from user_drunken_miner.js
+// Building type numbers for SendServerAction(50, ...) â€” from user_drunken_miner.js
 var _gmBuildType = {
     'IronOre':     50,
     'Coal':        37,
@@ -34,7 +34,7 @@ var _gmBuildType = {
     'Salpeter':    63
 };
 
-// Construction costs per mine type (IronOre confirmed from game; others estimated — correct if wrong)
+// Construction costs per mine type (IronOre confirmed from game; others estimated â€” correct if wrong)
 var _gmBuildCost = {
     'BronzeOre':   [{ name: 'Plank', amount:  30 }, { name: 'Stone', amount:   5 }, { name: 'Tool', amount:  20 }],
     'IronOre':     [{ name: 'Plank', amount: 250 }, { name: 'Stone', amount: 250 }, { name: 'Tool', amount: 200 }],
@@ -59,7 +59,7 @@ function _gmStartAutoBuildWatcher() {
             found.forEach(function (m) { current[m.Grid] = m; });
 
             if (_gmAutoBuildSeenGrids === null) {
-                // First tick: snapshot existing deposits — don't build them
+                // First tick: snapshot existing deposits â€” don't build them
                 _gmAutoBuildSeenGrids = current;
                 return;
             }
@@ -94,6 +94,32 @@ function _gmStartAutoBuildWatcher() {
                 })(buildIdx * 1500, m);
                 buildIdx++;
             });
+
+            // Auto-send idle geos to not-urgent mines whose window is closing (within 1h buffer)
+            var autoBuffer = 60 * 60 * 1000;
+            var autoSendUsed = [];
+            var autoSendDelay = 0;
+            data.mines.filter(function(m) { return m.Secs > 0 && !_gmOreLimit[m.OreName]; }).forEach(function(m) {
+                var searching  = data.searchingByOre[m.OreName] || 0;
+                var best = _gmBestGeo(data.geos, m.OreName, autoSendUsed);
+                if (!best || !best.IsIdle) return;
+                var geoMs      = _gmSearchMs(best.Spec, m.OreName);
+                var depleted   = data.depletedCountByOre[m.OreName] || 0;
+                var willDeplete = 0;
+                data.mines.forEach(function(n) {
+                    if (n.OreName === m.OreName && n.Secs > 0 && n.Secs * 1000 < geoMs) willDeplete++;
+                });
+                var needs = depleted + willDeplete;
+                if (searching >= needs) return;  // enough geos already cover mines that will need them
+                var mineMsLeft = m.Secs * 1000;
+                if (mineMsLeft - geoMs <= autoBuffer) {
+                    autoSendDelay += 1500;
+                    autoSendUsed.push(best.UID);
+                    (function(g, ore, delay) {
+                        setTimeout(function() { try { _gmSendGeo(g.Spec, ore); } catch(e) {} }, delay);
+                    })(best, m.OreName, autoSendDelay);
+                }
+            });
         } catch (e) {}
     }, 15000); // poll every 15 seconds
 }
@@ -110,6 +136,19 @@ function _gmSavePref(uid, depositName) {
         delete _gmPrefs[uid];
     }
     try { storeSettings(_gmPrefs, 'gmPrefs'); } catch (e) {}
+}
+
+// Persisted at-game-limit ore types -- geos will not auto-send to these
+var _gmOreLimit = {};
+try { _gmOreLimit = readSettings(null, 'gmOreLimit') || {}; } catch (e) {}
+
+function _gmSetOreLimit(ore, limited) {
+    if (limited) {
+        _gmOreLimit[ore] = true;
+    } else {
+        delete _gmOreLimit[ore];
+    }
+    try { storeSettings(_gmOreLimit, 'gmOreLimit'); } catch (e) {}
 }
 
 // ---- Format milliseconds as human-readable duration ----
@@ -169,7 +208,7 @@ function _gmSendGeo(spec, depositName) {
 }
 
 // ---- Check if player can afford a mine build cost ----
-// Returns HTML: green "✓ Ready" or red list of "icon have/need" for each missing resource
+// Returns HTML: green "âœ“ Ready" or red list of "icon have/need" for each missing resource
 function _gmCheckCost(oreName, resources) {
     var costs = _gmBuildCost[oreName];
     if (!costs) return '<span style="color:#999">?</span>';
@@ -224,7 +263,14 @@ function _gmCollectData() {
             });
         } catch (e) {}
     });
-    geos.sort(function (a, b) { return a.Name.localeCompare(b.Name); });
+    geos.sort(function (a, b) {
+        // Idle geos go to the bottom
+        if (a.IsIdle !== b.IsIdle) return a.IsIdle ? 1 : -1;
+        // Both busy: sort by remaining time ascending
+        if (!a.IsIdle && !b.IsIdle) return a.RemMs - b.RemMs;
+        // Both idle: alphabetical
+        return a.Name.localeCompare(b.Name);
+    });
 
     // -- Build deposit map (grid -> deposit object) --
     var depositMap = {};
@@ -255,7 +301,7 @@ function _gmCollectData() {
                 claimedDepositGrids[bld.GetGrid()] = true;
             }
             if (!dep) {
-                // Exhausted mine buildings lose their deposit reference — catch them by name
+                // Exhausted mine buildings lose their deposit reference â€” catch them by name
                 try {
                     var exName = bld.GetBuildingName_string();
                     var exUp = exName.toUpperCase();
@@ -283,7 +329,7 @@ function _gmCollectData() {
             }
 
             var nameKey = bld.GetBuildingName_string();
-            // Skip farmfields and garrisons — they aren't real mines
+            // Skip farmfields and garrisons â€” they aren't real mines
             var nUp = nameKey.toUpperCase();
             if (nUp.indexOf('FARMFIELD') !== -1) return;
             try { if (bld.isGarrison()) return; } catch (e) {}
@@ -293,7 +339,7 @@ function _gmCollectData() {
 
             var amt = dep.GetAmount();
             if (amt <= 0) {
-                // Depleted mine — needs a geologist to replenish
+                // Depleted mine â€” needs a geologist to replenish
                 var lvlD = 0;
                 try { lvlD = bld.GetUpgradeLevel(); } catch (e) {}
                 depletedMines.push({
@@ -343,7 +389,7 @@ function _gmCollectData() {
 
     // -- Found deposits: in depositMap, have ore, geo-searchable, but no building built on them yet --
     // Quarry ores (Stone, Marble) always have a quarry building linked via GetDepositBuildingGridPos()
-    // but the link may not be detectable reliably, so exclude them — they're never "buildable" mines.
+    // but the link may not be detectable reliably, so exclude them â€” they're never "buildable" mines.
     var _gmQuarryOres = { 'Stone': true, 'Marble': true };
     var foundMines = [];
     for (var fg in depositMap) {
@@ -354,7 +400,7 @@ function _gmCollectData() {
             if (fd.GetAmount() <= 0) continue;
             var foreName = fd.GetName_string();
             if (!_gmDepositTask[foreName]) continue;
-            if (_gmQuarryOres[foreName]) continue;  // quarry ore — always has a building, skip
+            if (_gmQuarryOres[foreName]) continue;  // quarry ore â€” always has a building, skip
             foundMines.push({ OreName: foreName, Amt: fd.GetAmount(), Grid: parseInt(fg, 10) });
         } catch (e) {}
     }
@@ -403,8 +449,14 @@ function _gmCollectData() {
     var resources = null;
     try { resources = game.getResources(); } catch (e) {}
 
+    var activeMinesByOre = {};
+    mines.forEach(function(m) {
+        if (m.Secs > 0) activeMinesByOre[m.OreName] = (activeMinesByOre[m.OreName] || 0) + 1;
+    });
+
     return { geos: geos, mines: mines, foundMines: foundMines, depletedMines: depletedMines, depleted: depleted,
-             searchingByOre: searchingByOre, depletedCountByOre: depletedCountByOre, resources: resources };
+             searchingByOre: searchingByOre, depletedCountByOre: depletedCountByOre, resources: resources,
+             activeMinesByOre: activeMinesByOre };
 }
 
 // ---- Pick best idle geologist for an ore type ----
@@ -458,6 +510,23 @@ function _gmSmartSendAll() {
 function _gmRender(data) {
     var out = '<div class="container-fluid">';
     var idleCount = data.geos.filter(function (g) { return g.IsIdle; }).length;
+
+    // ------ Active mines summary ------
+    var activeByOre = {};
+    data.mines.forEach(function (m) {
+        if (m.Secs > 0 && _gmDepositTask[m.OreName]) {
+            activeByOre[m.OreName] = (activeByOre[m.OreName] || 0) + 1;
+        }
+    });
+    var activeOreKeys = Object.keys(activeByOre);
+    if (activeOreKeys.length > 0) {
+        var totalActive = 0, activeHtml = '';
+        activeOreKeys.forEach(function (ore) {
+            totalActive += activeByOre[ore];
+            activeHtml += getImageTag(ore, '18px', '18px') + '&nbsp;' + activeByOre[ore] + '&nbsp;&nbsp;';
+        });
+        out += '<div class="gm-section">Active Mines (' + totalActive + '): ' + activeHtml + '</div>';
+    }
 
     // ------ Depleted deposits summary ------
     var deplKeys = Object.keys(data.depleted);
@@ -515,23 +584,25 @@ function _gmRender(data) {
     });
 
     // ------ Depleted Mines ------
-    var depMines = (data.depletedMines || []).slice();
-    depMines.sort(function (a, b) { return a.Name.localeCompare(b.Name); });
+    var allDepMines = (data.depletedMines || []).slice();
+    allDepMines.sort(function (a, b) { return a.Name.localeCompare(b.Name); });
+    var depMines     = allDepMines.filter(function (m) { return !_gmOreLimit[m.OreName]; });
+    var limitedMines = allDepMines.filter(function (m) { return  _gmOreLimit[m.OreName]; });
+
     out += '<div class="gm-section">Depleted Mines (' + depMines.length + ')</div>';
     if (depMines.length > 0) {
         var sendAllBtn = $('<button>').attr({
             id: 'gmDepSendAllBtn',
             'class': 'btn btn-xs btn-success'
         }).text('Send All').prop('outerHTML');
-        out += createTableRow([[4, 'Mine'], [3, 'Ore'], [3, 'Best Geo'], [2, sendAllBtn]], true);
+        out += createTableRow([[3, 'Mine'], [3, 'Ore'], [2, 'Best Geo'], [2, sendAllBtn], [2, '']], true);
         depMines.forEach(function (m) {
             var searching   = data.searchingByOre[m.OreName] || 0;
             var deplCount   = data.depletedCountByOre[m.OreName] || 1;
-            var atCap       = searching >= deplCount;  // enough geos already cover all depleted spots
+            var atCap       = searching >= deplCount;
             var best        = _gmBestGeo(data.geos, m.OreName, []);
             var bestLabel, sendBtn;
             if (atCap) {
-                // All depleted slots for this ore already have a geo assigned → would fail with "too many"
                 bestLabel = '<span style="color:#ffaa00">' + searching + ' geo(s) searching</span>';
                 sendBtn   = '<span style="color:#999;font-style:italic;">At cap</span>';
             } else {
@@ -545,67 +616,91 @@ function _gmRender(data) {
                       }).text('Send Geo').prop('outerHTML')
                     : '';
             }
+            var markBtn = $('<button>').attr({
+                'class'   : 'btn btn-xs btn-default gmMarkLimitBtn',
+                'data-ore': m.OreName
+            }).text('At Limit').prop('outerHTML');
             var gotoIcon = getImageTag('accuracy.png', '18px', '18px')
                 .replace('<img', '<img id="gmGoto_' + m.Grid + '"')
                 .replace('style="', 'style="cursor:pointer;vertical-align:middle;');
             out += createTableRow([
-                [4, gotoIcon + '&nbsp;' + m.Name],
+                [3, gotoIcon + '&nbsp;' + m.Name],
                 [3, getImageTag(m.OreName, '18px') + '&nbsp;' + loca.GetText('RES', m.OreName)],
-                [3, bestLabel],
-                [2, sendBtn]
+                [2, bestLabel],
+                [2, sendBtn],
+                [2, markBtn]
             ]);
         });
     } else {
         out += '<div style="color:#999;padding:4px 10px;font-style:italic;">No depleted mines found.</div>';
     }
 
-    // ------ Mines: Urgent < 2h ------
-    var urgentMines    = data.mines.filter(function (m) { return m.Secs > 0 && m.Secs <= 7200; });
-    var notUrgentMines = data.mines.filter(function (m) { return m.Secs > 7200 || m.Secs === 0; });
-    var foundMines     = data.foundMines || [];
-
-    // Keep legacy alias so _gmSmartSendAll still works
-    var otherMines = notUrgentMines;
-
-    out += '<div class="gm-section">Mines &mdash; Depleting &lt; 2h (' + urgentMines.length + ')</div>';
-    if (urgentMines.length > 0) {
-        out += createTableRow([
-            [3, 'Mine'],
-            [2, 'Ore'],
-            [2, 'Deposit'],
-            [2, 'Depletes In'],
-            [2, 'Best Geo'],
-            [1, '']
-        ], true);
-        urgentMines.forEach(function (m) {
-            var timeCls  = m.Secs < 3600 ? 'gm-urgent' : 'gm-warn';
-            var best     = _gmBestGeo(data.geos, m.OreName, []);
+    // ------ At Game Limit section ------
+    var limitedOres = Object.keys(_gmOreLimit);
+    out += '<div class="gm-section">At Game Limit (' + limitedOres.length + ')</div>';
+    if (limitedOres.length > 0) {
+        out += createTableRow([[3, 'Mine'], [3, 'Ore'], [2, 'Best Geo'], [2, 'Send Anyway'], [2, '']], true);
+        var shownOres = {};
+        limitedMines.forEach(function (m) {
+            shownOres[m.OreName] = true;
+            var best = _gmBestGeo(data.geos, m.OreName, []);
             var bestLabel = best
                 ? (best.IsIdle ? best.Name : '<em>' + best.Name + ' (busy)</em>')
                 : '<span style="color:#999">none</span>';
             var sendBtn = (best && best.IsIdle)
                 ? $('<button>').attr({
-                    'class'    : 'btn btn-xs btn-warning gmSendBtn',
-                    'data-uid' : best.UID,
-                    'data-ore' : m.OreName
-                  }).text('Send').prop('outerHTML')
-                : '';
+                    'class'   : 'btn btn-xs btn-warning gmDepSendBtn',
+                    'data-ore': m.OreName
+                  }).text('Send Anyway').prop('outerHTML')
+                : '<span style="color:#999">no idle geo</span>';
+            var clearBtn = $('<button>').attr({
+                'class'   : 'btn btn-xs btn-success gmClearLimitBtn',
+                'data-ore': m.OreName
+            }).text('Clear Limit').prop('outerHTML');
             var gotoIcon = getImageTag('accuracy.png', '18px', '18px')
                 .replace('<img', '<img id="gmGoto_' + m.Grid + '"')
                 .replace('style="', 'style="cursor:pointer;vertical-align:middle;');
-
             out += createTableRow([
                 [3, gotoIcon + '&nbsp;' + m.Name],
-                [2, getImageTag(m.OreName, '18px') + '&nbsp;' + loca.GetText('RES', m.OreName)],
-                [2, m.Amt.toLocaleString()],
-                [2, '<span class="' + timeCls + '">' + _gmFmt(m.Secs * 1000) + '</span>'],
+                [3, getImageTag(m.OreName, '18px') + '&nbsp;' + loca.GetText('RES', m.OreName)],
                 [2, bestLabel],
-                [1, sendBtn]
+                [2, sendBtn],
+                [2, clearBtn]
+            ]);
+        });
+        limitedOres.forEach(function (ore) {
+            if (shownOres[ore]) return;
+            var best = _gmBestGeo(data.geos, ore, []);
+            var bestLabel = best
+                ? (best.IsIdle ? best.Name : '<em>' + best.Name + ' (busy)</em>')
+                : '<span style="color:#999">none</span>';
+            var sendBtn = (best && best.IsIdle)
+                ? $('<button>').attr({
+                    'class'   : 'btn btn-xs btn-warning gmDepSendBtn',
+                    'data-ore': ore
+                  }).text('Send Anyway').prop('outerHTML')
+                : '<span style="color:#999">no idle geo</span>';
+            var clearBtn = $('<button>').attr({
+                'class'   : 'btn btn-xs btn-success gmClearLimitBtn',
+                'data-ore': ore
+            }).text('Clear Limit').prop('outerHTML');
+            out += createTableRow([
+                [3, '&mdash;'],
+                [3, getImageTag(ore, '18px') + '&nbsp;' + loca.GetText('RES', ore)],
+                [2, bestLabel],
+                [2, sendBtn],
+                [2, clearBtn]
             ]);
         });
     } else {
-        out += '<div style="color:#999;padding:4px 10px;font-style:italic;">No mines depleting within 2 hours.</div>';
+        out += '<div style="color:#999;padding:4px 10px;font-style:italic;">No ores marked at game limit.</div>';
     }
+
+    var notUrgentMines = data.mines.slice();  // all active mines (urgent coloring handled per-row)
+    var foundMines     = data.foundMines || [];
+
+    // Keep legacy alias so _gmSmartSendAll still works
+    var otherMines = notUrgentMines;
 
     // ------ Mines: Not urgent ------
     out += '<div class="gm-section">Mines &mdash; Found / Not Built (' + foundMines.length + ')</div>';
@@ -635,7 +730,7 @@ function _gmRender(data) {
         out += '<div style="color:#999;padding:4px 10px;font-style:italic;">No unbuilt deposits found.</div>';
     }
 
-    out += '<div class="gm-section">Mines &mdash; Not Urgent (' + notUrgentMines.length + ')</div>';
+    out += '<div class="gm-section">Mines &mdash; Active (' + notUrgentMines.length + ')</div>';
     if (notUrgentMines.length > 0) {
         out += createTableRow([
             [3, 'Mine'],
@@ -651,8 +746,29 @@ function _gmRender(data) {
                 .replace('style="', 'style="cursor:pointer;vertical-align:middle;');
 
             var timeStr, foundInStr = '', sendBtn = '';
+            var searching   = data.searchingByOre[m.OreName] || 0;
+            var bestForCap  = _gmBestGeo(data.geos, m.OreName, []);
+            var capGeoMs    = bestForCap ? _gmSearchMs(bestForCap.Spec, m.OreName) : 0;
+            var depleted    = data.depletedCountByOre[m.OreName] || 0;
+            var willDeplete = 0;
+            if (capGeoMs > 0) {
+                data.mines.forEach(function(n) {
+                    if (n.OreName === m.OreName && n.Secs > 0 && n.Secs * 1000 < capGeoMs) willDeplete++;
+                });
+            }
+            var needs       = depleted + willDeplete;
+            var atCap       = searching >= needs;
+
             if (m.Secs <= 0) {
                 timeStr = '<span style="color:#999">Mine idle</span>';
+                if (searching > 0) {
+                var busyForOre = data.geos.filter(function(g) { return !g.IsIdle && g.BusyOre === m.OreName; });
+                var minRemMs   = busyForOre.length > 0 ? Math.min.apply(null, busyForOre.map(function(g) { return g.RemMs; })) : 0;
+                foundInStr = minRemMs > 0
+                    ? '<span style="color:#ffaa00">next geo ready in ' + _gmFmt(minRemMs) + '</span>'
+                    : '<span style="color:#ffaa00">' + searching + ' geo(s) searching</span>';
+                    sendBtn    = '<span style="color:#999;font-style:italic;">At cap</span>';
+                }
             } else {
                 var mineMsLeft = m.Secs * 1000;
 
@@ -671,29 +787,42 @@ function _gmRender(data) {
                     ? '<span class="gm-urgent">' + _gmFmt(mineMsLeft) + '</span>'
                     : '<span class="gm-ok">' + _gmFmt(mineMsLeft) + '</span>';
 
-                // Pick geo whose time is closest to mine depletion time, idle preferred on tie
-                candidates.sort(function (a, b) {
-                    var da = Math.abs(a.ms - mineMsLeft);
-                    var db = Math.abs(b.ms - mineMsLeft);
-                    if (da !== db) return da - db;
-                    return (b.g.IsIdle ? 1 : 0) - (a.g.IsIdle ? 1 : 0); // idle first on tie
-                });
-                var pick = candidates[0] || null;
+                if (atCap) {
+                var busyForOre = data.geos.filter(function(g) { return !g.IsIdle && g.BusyOre === m.OreName; });
+                var minRemMs   = busyForOre.length > 0 ? Math.min.apply(null, busyForOre.map(function(g) { return g.RemMs; })) : 0;
+                foundInStr = minRemMs > 0
+                    ? '<span style="color:#ffaa00">next geo ready in ' + _gmFmt(minRemMs) + '</span>'
+                    : '<span style="color:#ffaa00">' + searching + ' geo(s) searching</span>';
+                    sendBtn    = '<span style="color:#999;font-style:italic;">At cap</span>';
+                } else {
+                    // Pick geo whose time is closest to mine depletion, idle preferred on tie
+                    candidates.sort(function (a, b) {
+                        var da = Math.abs(a.ms - mineMsLeft);
+                        var db = Math.abs(b.ms - mineMsLeft);
+                        if (da !== db) return da - db;
+                        return (b.g.IsIdle ? 1 : 0) - (a.g.IsIdle ? 1 : 0);
+                    });
+                    var pick = candidates[0] || null;
 
-                if (pick) {
-                    var busyNote  = pick.g.IsIdle ? '' : ' <em>(busy)</em>';
-                    var arrivesAfter = pick.ms >= mineMsLeft;
-                    var msColor   = arrivesAfter ? 'gm-ok' : 'gm-warn';
-                    var nameStyle = anyAfter ? '' : 'color:#999;';
-                    foundInStr = '<span style="' + nameStyle + '">' + pick.g.Name + busyNote + '</span>' +
-                        '<br/><small><span class="' + msColor + '">' + _gmFmt(pick.ms) + '</span></small>';
-                    // Send button only if this geo is idle AND arrives after depletion
-                    if (pick.g.IsIdle && arrivesAfter) {
-                        sendBtn = $('<button>').attr({
-                            'class'    : 'btn btn-xs btn-warning gmNUSendBtn',
-                            'data-uid' : pick.g.UID,
-                            'data-ore' : m.OreName
-                        }).text('Send').prop('outerHTML');
+                    if (searching > 0) {
+                        foundInStr = '<span style="color:#ffaa00">' + searching + ' geo(s) searching</span><br/>';
+                    }
+
+                    if (pick) {
+                        var busyNote     = pick.g.IsIdle ? '' : ' <em>(busy)</em>';
+                        var arrivesAfter = pick.ms >= mineMsLeft;
+                        var msColor      = arrivesAfter ? 'gm-ok' : 'gm-warn';
+                        var nameStyle    = anyAfter ? '' : 'color:#999;';
+                        foundInStr += '<span style="' + nameStyle + '">' + pick.g.Name + busyNote + '</span>' +
+                            '<br/><small><span class="' + msColor + '">' + _gmFmt(pick.ms) + '</span></small>';
+                        // Send button only if idle AND geo barely makes it (or is already too late)
+                        if (pick.g.IsIdle && arrivesAfter) {
+                            sendBtn = $('<button>').attr({
+                                'class'    : 'btn btn-xs btn-warning gmNUSendBtn',
+                                'data-uid' : pick.g.UID,
+                                'data-ore' : m.OreName
+                            }).text('Send').prop('outerHTML');
+                        }
                     }
                 }
             }
@@ -769,7 +898,7 @@ function _gmRender(data) {
                 queue.push({ spec: g.Spec, ore: g.Pref });
             });
 
-            // Phase 2: remaining idle geos → best-matching remaining available ore
+            // Phase 2: remaining idle geos â†’ best-matching remaining available ore
             idleGeos.forEach(function (g) {
                 if (used.indexOf(g.UID) >= 0) return;
                 var bestOre = null, bestMs = Infinity;
@@ -838,6 +967,18 @@ function _gmRender(data) {
         } catch (e) { game.showAlert('Build error: ' + e); }
     });
 
+    // ---- Event: Mark ore as at game limit ----
+    $('.gmMarkLimitBtn').off('click').on('click', function () {
+        _gmSetOreLimit($(this).data('ore'), true);
+        _gmRefresh();
+    });
+
+    // ---- Event: Clear ore game limit ----
+    $('.gmClearLimitBtn').off('click').on('click', function () {
+        _gmSetOreLimit($(this).data('ore'), false);
+        _gmRefresh();
+    });
+
     // ---- Event: Go-to map ----
     $('[id^="gmGoto_"]').off('click').on('click', function () {
         var grid = parseInt(this.id.replace('gmGoto_', ''), 10);
@@ -872,7 +1013,6 @@ function _gmMenuHandler() {
     try {
         if ($('#gmModal .modal-header .container-fluid').length === 0) {
 
-            // Inject styles
             $('#gmStyle').remove();
             $('head').append($('<style>', { id: 'gmStyle' }).text(
                 '#gmModal div.row:hover { background-color: #A65329; }' +
@@ -917,3 +1057,4 @@ function _gmMenuHandler() {
 
     $('#gmModal:not(:visible)').modal({ backdrop: 'static' });
 }
+
