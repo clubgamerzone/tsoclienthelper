@@ -8,7 +8,7 @@ All scripts live in `userscripts/` and are loaded automatically by the client. D
 
 | Script | Name | Description |
 |---|---|---|
-| `user_geo_manager.js` | **Geo Manager** | Full geologist management: shows all geologists (idle & busy), active mine depletion countdowns, depleted mine list, smart geo-send, auto-build when a new deposit is found |
+| `user_geo_manager.js` | **Geo Manager** | Full geologist management: idle/busy geos with per-geo preferred ore type; active mine depletion countdowns; depleted mine list with smart auto-send; auto-build new deposits; per-building game-limit marking; quarry cap (1 geo per quarry ore); geo-to-mine assignment display; auto-send toggle + max-geos-per-cycle control; correct coverage logic (geo search time must exceed mine depletion time, per geo per ore) |
 | `user_deposit.js` | Deposits Viewer | Shows info about your deposits |
 | `user_buildlist.js` | Building List | List of buildings with monitoring for upgrades |
 | `user_building_expansion.js` | Building Expansion | Expansion via templates with save/load and max-level limit |
