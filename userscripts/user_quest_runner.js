@@ -105,14 +105,110 @@ var _qrBsState       = null;  // { steps, stepIdx, profile } while battle script
 var _qrGeneralsCollapsed   = false;  // collapsed state for Generals section
 var _qrBattleFlowCollapsed = false;  // collapsed state for Battle Flow section
 
+// ---- Modal minimize/restore ----
+function _qrMinimizeModal() {
+    if (!_qrModal) { return; }
+    _qrModal.Body().hide();
+    // Remove backdrop and make modal non-blocking so the game map is fully clickable
+    $('.modal-backdrop').css('display', 'none');
+    $('#questRunnerModal').css('pointer-events', 'none');
+    $('#questRunnerModal .modal-footer').css('pointer-events', 'auto');
+    $('#qrMinimizeBtn').text('[+]').attr('title', 'Restore window');
+    _qrBsUpdateControls();
+}
+function _qrRestoreModal() {
+    if (!_qrModal) { return; }
+    _qrModal.Body().show();
+    // Restore backdrop and pointer events
+    $('.modal-backdrop').css('display', '');
+    $('#questRunnerModal').css('pointer-events', '');
+    $('#questRunnerModal .modal-footer').css('pointer-events', '');
+    $('#qrMinimizeBtn').text('[−]').attr('title', 'Minimize window');
+    _qrBsUpdateControls();
+}
+
 // ---- Persistence ----
+// Profiles are stored in a dedicated file next to settings.json so they don't
+// bloat the shared settings blob and can be exported/imported freely.
+function _qrProfileFile() {
+    return new air.File('file:///' + air.File.applicationDirectory.resolvePath('quest_runner_profiles.json').nativePath);
+}
+
 function _qrLoad() {
+    try {
+        var pf = _qrProfileFile();
+        if (pf.exists) {
+            var fs = new air.FileStream();
+            fs.open(pf, air.FileMode.READ);
+            var raw = fs.readUTFBytes(fs.bytesAvailable);
+            fs.close();
+            var parsed = JSON.parse(raw);
+            _qrProfiles = Array.isArray(parsed) ? parsed : [];
+            return;
+        }
+    } catch (e) {}
+    // Legacy migration: read from settings.json and move to separate file on next save
     var d = readSettings(null, _qrSettingsKey);
     _qrProfiles = (d && Array.isArray(d.profiles)) ? d.profiles : [];
 }
 
 function _qrSave() {
-    storeSettings({ profiles: _qrProfiles }, _qrSettingsKey);
+    try {
+        var pf = _qrProfileFile();
+        var fs = new air.FileStream();
+        fs.open(pf, air.FileMode.WRITE);
+        fs.writeUTFBytes(JSON.stringify(_qrProfiles, null, '  '));
+        fs.close();
+        // Clear legacy entry from settings.json once successfully migrated
+        var legacy = readSettings(null, _qrSettingsKey);
+        if (legacy && legacy.profiles) {
+            storeSettings({}, _qrSettingsKey);
+        }
+    } catch (e) {
+        // Fallback: write to settings.json if file I/O fails
+        storeSettings({ profiles: _qrProfiles }, _qrSettingsKey);
+    }
+}
+
+function _qrExportProfiles() {
+    try {
+        _qrSaveCurrentFromUI();
+        var json = JSON.stringify(_qrProfiles, null, '  ');
+        var f = new air.File(air.File.documentsDirectory.nativePath).resolvePath('quest_runner_profiles.json');
+        f.addEventListener(air.Event.COMPLETE, function () {
+            game.chatMessage('Quest Runner: profiles exported.', 'adventurer');
+        });
+        f.save(json, 'Save Quest Runner profiles');
+    } catch (e) { showGameAlert('Export failed: ' + e); }
+}
+
+function _qrImportProfiles() {
+    try {
+        var f = new air.File(air.File.documentsDirectory.nativePath);
+        var filter = new air.FileFilter('JSON files', '*.json');
+        f.addEventListener(air.Event.SELECT, function (ev) {
+            ev.target.addEventListener(air.Event.COMPLETE, function (ev2) {
+                try {
+                    var parsed = JSON.parse(ev2.target.data);
+                    if (!Array.isArray(parsed)) { showGameAlert('Import failed: file does not contain a profiles array.'); return; }
+                    // Merge: add profiles whose id does not already exist
+                    var existingIds = {};
+                    _qrProfiles.forEach(function (p) { existingIds[p.id] = true; });
+                    var added = 0;
+                    parsed.forEach(function (p) {
+                        if (!p.id) { p.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+                        if (!existingIds[p.id]) { _qrProfiles.push(p); added++; }
+                    });
+                    _qrSave();
+                    _qrSelectedIdx = _qrProfiles.length - 1;
+                    _qrRenderAll();
+                    game.chatMessage('Quest Runner: imported ' + added + ' profile(s).', 'adventurer');
+                } catch (e) { showGameAlert('Import parse error: ' + e); }
+            });
+            ev.target.load();
+        });
+        f.browseForOpen('Import Quest Runner profiles', [filter]);
+    } catch (e) { showGameAlert('Import failed: ' + e); }
 }
 
 // -- Profile shape helper --
@@ -309,8 +405,28 @@ function _qrOpenModal() {
     if (_qrModal.withFooter('.qrSaveBtn').length === 0) {
         _qrModal.Footer().prepend([
             $('<button>').attr({ 'class': 'btn btn-primary qrSaveBtn' }).text(_qrT('save')).click(_qrSaveAndPersist),
-            $('<button>').attr({ 'class': 'btn btn-success pull-right qrRunBtn' }).text(_qrT('run')).click(_qrRun)
+            $('<button>').attr({ 'class': 'btn btn-success pull-right qrRunBtn' }).text(_qrT('run')).click(_qrRun),
+            $('<button>').attr({ 'class': 'btn btn-default', 'id': 'qrMinimizeBtn', 'title': 'Minimize window', 'style': 'margin-right:6px;' })
+                .text('[−]')
+                .click(function () {
+                    if (_qrModal.Body().is(':visible')) { _qrMinimizeModal(); } else { _qrRestoreModal(); }
+                }),
+            $('<button>').attr({ 'class': 'btn btn-danger', 'id': 'qrBsStopBtnFtr', 'style': 'display:none;margin-right:4px;' })
+                .text('\u25a0 Stop').click(function () { _qrBsStop(); }),
+            $('<button>').attr({ 'class': 'btn btn-warning', 'id': 'qrBsContinueBtnFtr', 'style': 'display:none;margin-right:4px;' })
+                .text('\u25b6 Continue').click(function () {
+                    if (_qrBsState && _qrBsState.stopped) { _qrRunBattleScript(_qrBsState.stepIdx); }
+                }),
+            $('<button>').attr({ 'class': 'btn btn-default', 'id': 'qrBsRestartBtnFtr', 'style': 'display:none;margin-right:4px;' })
+                .text('\u21ba Restart').click(function () { _qrBsState = null; _qrRunBattleScript(0); })
         ]);
+        // Step progress panel — full-width row below buttons, shown only while minimized
+        _qrModal.Footer().append(
+            $('<div>').attr('id', 'qrBsStepProgress')
+                .css({ 'display': 'none', 'width': '100%', 'margin-top': '5px',
+                       'padding': '4px 8px', 'background': '#111',
+                       'border': '1px solid #333', 'border-radius': '4px', 'clear': 'both' })
+        );
     }
 
     _qrRenderAll();
@@ -353,6 +469,18 @@ function _qrRenderSidebar() {
             _qrRenderAll();
         })
         .appendTo($sb);
+
+    // Export / Import row
+    $('<div>').css({ 'display': 'flex', 'gap': '4px', 'margin-bottom': '8px' }).append(
+        $('<button>').attr({ 'class': 'btn btn-default btn-sm', 'title': 'Export all profiles to a JSON file' })
+            .css({ 'flex': '1' })
+            .text('\u2913 Export')
+            .click(_qrExportProfiles),
+        $('<button>').attr({ 'class': 'btn btn-default btn-sm', 'title': 'Import profiles from a JSON file (merges, skips duplicates)' })
+            .css({ 'flex': '1' })
+            .text('\u2912 Import')
+            .click(_qrImportProfiles)
+    ).appendTo($sb);
 
     if (_qrProfiles.length === 0) {
         $('<p>').css({ 'color': '#aaa', 'font-size': '12px' }).text(_qrT('noProfiles')).appendTo($sb);
@@ -928,6 +1056,15 @@ function _qrMakeStepRow(step, idx) {
         });
     $minArmySection.append($setMinBtn);
 
+    // Max capacity input (used by FILL_AND_RETURN)
+    var $capRow = $('<div>').css({ 'margin-top': '6px', 'display': 'flex', 'align-items': 'center', 'gap': '6px' });
+    $('<span>').css({ 'font-size': '10px', 'color': '#aaa', 'white-space': 'nowrap' })
+        .text('Max capacity (FILL):').appendTo($capRow);
+    $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs qrGenCapInput', 'min': '1', 'max': '2000' })
+        .css({ 'width': '70px' })
+        .val(step.generalCapacity || 200).appendTo($capRow);
+    $minArmySection.append($capRow);
+
     // Enforce floor: when a min input changes, clamp the corresponding army input
     $minArmySection.on('input', '.qrStepMinInput', function () {
         var t    = $(this).attr('data-type');
@@ -996,7 +1133,8 @@ function _qrSaveCurrentFromUI() {
             var amount = parseInt($(this).val(), 10) || 0;
             if (type && amount > 0) { stepMinArmy[type] = amount; }
         });
-        newSteps.push({ generalUID: genUID, generalName: genName, army: army, stepMinArmy: stepMinArmy });
+        var generalCapacity = parseInt($row.find('.qrGenCapInput').val(), 10) || 0;
+        newSteps.push({ generalUID: genUID, generalName: genName, army: army, stepMinArmy: stepMinArmy, generalCapacity: generalCapacity });
     });
     profile.steps = newSteps;
 
@@ -1020,7 +1158,9 @@ function _qrSaveCurrentFromUI() {
         if (Object.keys(armyData).length === 0) {
             try { armyData = JSON.parse($row.attr('data-army') || '{}'); } catch (e) {}
         }
-        newBs.push({ type: type, generalUID: genUID, generalName: genName, buildingName: bldName, buildingKey: bldKey, buildingDisplay: bldDisp, army: armyData, seconds: seconds });
+        var claimWaitSecs = parseInt($row.find('.qrCqWait').val(), 10) || 5;
+        var stepObj = { type: type, generalUID: genUID, generalName: genName, buildingName: bldName, buildingKey: bldKey, buildingDisplay: bldDisp, army: armyData, seconds: seconds, claimWaitSecs: claimWaitSecs };
+        newBs.push(stepObj);
     });
     profile.battleScript = newBs;
 }
@@ -1116,45 +1256,19 @@ function _qrRun() {
     var dResourceVODef  = swmmo.getDefinitionByName("Communication.VO::dResourceVO");
     var qrServices      = swmmo.getDefinitionByName("com.bluebyte.tso.service::ServiceManager").getInstance();
 
-    // Resolve zone — may be null if not yet placed (we'll place it first)
     var profileZoneId = _qrResolveAdventureZone(profile.adventureNameKey);
-    var adventurePlaced = !!profileZoneId;
-
-    var queue       = new TimedQueue(1500);
-    var stepCounter = 0;
 
     _qrRunning = true;
     _qrModal.withFooter('.qrRunBtn').prop('disabled', true).text(_qrT('running'));
 
-    // Step 0: place adventure from inventory if not already on map
-    if (!adventurePlaced) {
-        queue.add(function () {
-            try {
-                var buffItem = null;
-                game.gi.mCurrentPlayer.mAvailableBuffs_vector.forEach(function (item) {
-                    if (!buffItem && item.GetType() === 'Adventure' &&
-                        item.GetResourceName_string() === profile.adventureNameKey) {
-                        buffItem = item;
-                    }
-                });
-                if (!buffItem) { throw new Error(_qrT('adventureNotInInventory')); }
-                var uniqueId = buffItem.GetUniqueId();
-                game.gi.SendServerAction(61, 0, 0, 0, uniqueId);
-                game.chatMessage('Adventurer: placing ' + (profile.adventureDisplayName || profile.adventureNameKey), 'adventurer');
-            } catch (e) {
-                game.chatMessage('Adventurer place adventure error: ' + e, 'adventurer');
-            }
-        });
-        // Wait for server to place and register the zone (~5s), then resolve
-        queue.add(function () {
-            profileZoneId = _qrResolveAdventureZone(profile.adventureNameKey);
-            if (!profileZoneId) {
-                game.chatMessage('Adventurer: adventure zone not found after placement, generals may not dispatch correctly', 'adventurer');
-            }
-        }, 5000);
+    // Abort: restore button and optionally show an alert
+    function abortRun(msg) {
+        _qrRunning = false;
+        _qrModal.withFooter('.qrRunBtn').prop('disabled', false).text(_qrT('run'));
+        if (msg) { showGameAlert(msg); }
     }
 
-    // Helper: highlight a step row red for 2s to signal army shortage
+    // Highlight a general step row red briefly
     function highlightStepRed(stepIdx) {
         var $row = $('#qrSteps .qrStep').eq(stepIdx);
         if (!$row.length) { return; }
@@ -1163,11 +1277,11 @@ function _qrRun() {
         setTimeout(function () { $row.css({ 'outline': '', 'background-color': origBg }); }, 2000);
     }
 
-    // Helper: check if spec has enough of each unit in step.army
-    function stepHasMinArmy(spec, step) {
-        var minArmy = step.army || {};
-        var minKeys = Object.keys(minArmy).filter(function (k) { return minArmy[k] > 0; });
-        if (minKeys.length === 0) { return true; }
+    // Check if a general's current army meets step.army
+    function stepHasArmy(spec, step) {
+        var target = step.army || {};
+        var keys = Object.keys(target).filter(function (k) { return target[k] > 0; });
+        if (keys.length === 0) { return true; }
         var cur = {};
         try {
             spec.GetArmy().GetSquadsCollection_vector().forEach(function (sq) {
@@ -1176,95 +1290,169 @@ function _qrRun() {
                 if (t) { cur[t] = (cur[t] || 0) + a; }
             });
         } catch (e) {}
-        return minKeys.every(function (t) { return (cur[t] || 0) >= minArmy[t]; });
+        return keys.every(function (t) { return (cur[t] || 0) >= target[t]; });
     }
 
-    profile.steps.forEach(function (step, i) {
-        var hasArmy = step.army && Object.keys(step.army).length > 0;
-
-        if (hasArmy) {
-            // Step A: build & load army
-            queue.add(function () {
-                stepCounter++;
-                var spec = _qrFindSpecByUID(step.generalUID);
-                if (!spec) { game.chatMessage('Adventurer step ' + (i + 1) + ': general not found', 'adventurer'); return; }
-                try {
-                    var vo = new dRaiseArmyVODef();
-                    vo.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
-                    Object.keys(step.army).forEach(function (type) {
-                        var res = new dResourceVODef();
-                        res.name_string = type;
-                        res.amount = step.army[type];
-                        vo.unitSquads.addItem(res);
-                    });
-                    game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, vo);
-                } catch (e) {
-                    game.chatMessage('Adventurer army load error step ' + (i + 1) + ': ' + e, 'adventurer');
-                }
-            });
-            // Step B: after army load (~4s), check minimum then dispatch
-            queue.add(function () {
-                var spec   = _qrFindSpecByUID(step.generalUID);
-                var zoneId = profileZoneId;
-                if (!spec) { game.chatMessage('Adventurer step ' + (i + 1) + ': general not found for dispatch', 'adventurer'); return; }
-                if (!zoneId) { game.chatMessage('Adventurer step ' + (i + 1) + ': adventure zone not resolved', 'adventurer'); return; }
-                if (!stepHasMinArmy(spec, step)) {
-                    var genName = '';
-                    try { genName = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
-                    game.chatMessage('Adventurer step ' + (i + 1) + ': ' + genName + ' below minimum army — skipping dispatch.', 'adventurer');
-                    highlightStepRed(i);
-                    return;
-                }
-                try {
-                    qrServices.specialist.sendToZone(spec, zoneId);
-                } catch (e) {
-                    game.chatMessage('Adventurer sendToZone error step ' + (i + 1) + ': ' + e, 'adventurer');
-                }
-            }, 4500);
-        } else {
-            // No army configured — just dispatch (no min army check applicable)
-            queue.add(function () {
-                stepCounter++;
-                var spec   = _qrFindSpecByUID(step.generalUID);
-                var zoneId = profileZoneId;
-                if (!spec) { game.chatMessage('Adventurer step ' + (i + 1) + ': general not found', 'adventurer'); return; }
-                if (!zoneId) { game.chatMessage('Adventurer step ' + (i + 1) + ': adventure zone not resolved', 'adventurer'); return; }
-                try {
-                    qrServices.specialist.sendToZone(spec, zoneId);
-                } catch (e) {
-                    game.chatMessage('Adventurer sendToZone error step ' + (i + 1) + ': ' + e, 'adventurer');
-                }
-            });
-        }
-    });
-
-    // Done — navigate player view to adventure zone, then auto-start battle script after 30s
-    queue.add(function () {
-        _qrRunning = false;
-        _qrModal.withFooter('.qrRunBtn').prop('disabled', false).text(_qrT('run'));
-        game.chatMessage('Adventurer: all generals dispatched — navigating to adventure island…', 'adventurer');
+    // ── PHASE 4: navigate to island → wait 30s → start battle script ──
+    function doNavigateAndStart() {
         if (profileZoneId) {
             try { game.gi.visitZone(profileZoneId); } catch (e) {
                 game.chatMessage('Adventurer: could not navigate to zone: ' + e, 'adventurer');
             }
         }
         showGameAlert(_qrT('done'));
-        // Wait 30s for generals to arrive, then auto-run battle script
         var countdown = 30;
-        game.chatMessage('Adventurer: battle script starts in ' + countdown + 's…', 'adventurer');
+        game.chatMessage('Adventurer: battle script starts in ' + countdown + 's\u2026', 'adventurer');
         var ivCountdown = setInterval(function () {
             countdown -= 10;
             if (countdown > 0) {
-                game.chatMessage('Adventurer: battle script starts in ' + countdown + 's…', 'adventurer');
+                game.chatMessage('Adventurer: battle script starts in ' + countdown + 's\u2026', 'adventurer');
             } else {
                 clearInterval(ivCountdown);
                 game.chatMessage('Adventurer: starting battle script now.', 'adventurer');
                 _qrRunBattleScript(0);
             }
         }, 10000);
-    }, 500);
+    }
 
-    queue.run();
+    // ── PHASE 3: send each general to the adventure zone ──
+    function doDispatch() {
+        game.chatMessage('Adventurer: all generals dispatched \u2014 navigating to adventure island\u2026', 'adventurer');
+        var dispatchQ = new TimedQueue(1500);
+        profile.steps.forEach(function (step, i) {
+            dispatchQ.add(function () {
+                var spec   = _qrFindSpecByUID(step.generalUID);
+                var zoneId = profileZoneId;
+                if (!spec) { game.chatMessage('Adventurer: general not found for dispatch (step ' + (i + 1) + ')', 'adventurer'); return; }
+                if (!zoneId) { game.chatMessage('Adventurer: zone not resolved (step ' + (i + 1) + ')', 'adventurer'); return; }
+                try {
+                    qrServices.specialist.sendToZone(spec, zoneId);
+                    var nm = ''; try { nm = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
+                    game.chatMessage('Adventurer: \u2192 ' + nm + ' dispatched.', 'adventurer');
+                } catch (e) {
+                    game.chatMessage('Adventurer sendToZone error (step ' + (i + 1) + '): ' + e, 'adventurer');
+                }
+            });
+        });
+        dispatchQ.add(function () {
+            _qrRunning = false;
+            _qrModal.withFooter('.qrRunBtn').prop('disabled', false).text(_qrT('run'));
+            doNavigateAndStart();
+        }, 500);
+        dispatchQ.run();
+    }
+
+    // ── PHASE 2: place adventure (if needed), then always poll until zone confirmed (60s) ──
+    function doPlaceAndWaitZone() {
+        if (!profileZoneId) {
+            // Adventure not on map — place from inventory
+            try {
+                var buffItem = null;
+                game.gi.mCurrentPlayer.mAvailableBuffs_vector.forEach(function (item) {
+                    if (!buffItem && item.GetType() === 'Adventure' &&
+                        item.GetResourceName_string() === profile.adventureNameKey) { buffItem = item; }
+                });
+                if (!buffItem) { abortRun(_qrT('adventureNotInInventory')); return; }
+                var uniqueId = buffItem.GetUniqueId();
+                game.gi.SendServerAction(61, 0, 0, 0, uniqueId);
+                game.chatMessage('Adventurer: placing ' + (profile.adventureDisplayName || profile.adventureNameKey) + '\u2026', 'adventurer');
+            } catch (e) { abortRun('Cannot place adventure: ' + e); return; }
+        }
+        // Poll until zone is registered (always, even if already placed — ensures fresh zoneId)
+        game.chatMessage('Adventurer: waiting for adventure zone to become available\u2026', 'adventurer');
+        var pollTicks = 0;
+        var ivZone = setInterval(function () {
+            pollTicks++;
+            var found = _qrResolveAdventureZone(profile.adventureNameKey);
+            if (found) {
+                clearInterval(ivZone);
+                profileZoneId = found;
+                game.chatMessage('Adventurer: zone confirmed \u2713 \u2014 dispatching generals\u2026', 'adventurer');
+                doDispatch();
+            } else if (pollTicks > 30) { // 30 \u00d7 2s = 60s
+                clearInterval(ivZone);
+                abortRun('Adventure zone not confirmed after 60s \u2014 check the adventure was placed and try again.');
+            } else {
+                game.chatMessage('Adventurer: zone not ready yet (' + (pollTicks * 2) + 's)\u2026', 'adventurer');
+            }
+        }, 2000);
+    }
+
+    // ── PHASE 1: load armies → poll confirmation → check OK → proceed or stop ──
+    var stepsWithArmy = profile.steps.filter(function (s) {
+        return s.army && Object.keys(s.army).some(function (k) { return s.army[k] > 0; });
+    });
+
+    if (stepsWithArmy.length === 0) {
+        // No armies configured — skip straight to placing the adventure
+        game.chatMessage('Adventurer: no armies configured \u2014 skipping army load\u2026', 'adventurer');
+        doPlaceAndWaitZone();
+        return;
+    }
+
+    game.chatMessage('Adventurer: loading armies for ' + stepsWithArmy.length + ' general(s)\u2026', 'adventurer');
+    var armyLoadQ = new TimedQueue(1500);
+
+    stepsWithArmy.forEach(function (step) {
+        armyLoadQ.add(function () {
+            var spec = _qrFindSpecByUID(step.generalUID);
+            if (!spec) {
+                game.chatMessage('Adventurer: general not found for army load \u2014 ' + (step.generalName || step.generalUID), 'adventurer');
+                return;
+            }
+            var nm = ''; try { nm = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
+            try {
+                var vo = new dRaiseArmyVODef();
+                vo.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
+                Object.keys(step.army).forEach(function (type) {
+                    if (!(step.army[type] > 0)) { return; }
+                    var res = new dResourceVODef();
+                    res.name_string = type;
+                    res.amount = step.army[type];
+                    vo.unitSquads.addItem(res);
+                });
+                game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, vo);
+                game.chatMessage('Adventurer: loading army for ' + nm + '\u2026', 'adventurer');
+            } catch (e) {
+                game.chatMessage('Adventurer army load error for ' + nm + ': ' + e, 'adventurer');
+            }
+        });
+    });
+
+    // After all loads sent, poll until each general's army is confirmed (up to 30s), then check OK
+    armyLoadQ.add(function () {
+        game.chatMessage('Adventurer: verifying armies\u2026', 'adventurer');
+        var armyWait = 0;
+        var ivArmy = setInterval(function () {
+            armyWait++;
+            var armyErrors = [];
+            stepsWithArmy.forEach(function (step, i) {
+                var spec = _qrFindSpecByUID(step.generalUID);
+                if (!spec) { armyErrors.push((step.generalName || step.generalUID) + ': general not found'); return; }
+                if (!stepHasArmy(spec, step)) {
+                    var nm = ''; try { nm = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) { nm = step.generalUID; }
+                    var cur = {};
+                    try { spec.GetArmy().GetSquadsCollection_vector().forEach(function (sq) { var t = sq.GetType ? sq.GetType() : ''; var a = sq.GetAmount ? sq.GetAmount() : 0; if (t) { cur[t] = (cur[t] || 0) + a; } }); } catch (e2) {}
+                    Object.keys(step.army).forEach(function (t) {
+                        if (step.army[t] > 0 && (cur[t] || 0) < step.army[t]) {
+                            armyErrors.push(nm + ': needs ' + step.army[t] + ' ' + t + ', has ' + (cur[t] || 0));
+                        }
+                    });
+                    highlightStepRed(i);
+                }
+            });
+            if (armyErrors.length === 0) {
+                clearInterval(ivArmy);
+                game.chatMessage('Adventurer: armies OK \u2713 \u2014 placing adventure\u2026', 'adventurer');
+                doPlaceAndWaitZone();
+            } else if (armyWait > 15) { // 15 \u00d7 2s = 30s timeout
+                clearInterval(ivArmy);
+                abortRun('Army load failed \u2014 cannot proceed:\n\n' + armyErrors.join('\n'));
+            }
+        }, 2000);
+    }, 1500);
+
+    armyLoadQ.run();
 }
 
 // ============================================================
@@ -1902,6 +2090,22 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
             .val(bsStep.seconds || 5).appendTo($row);
     }
 
+    // CLAIM_QUESTS: pause-and-wait seconds input
+    if (bsStep.type === 'CLAIM_QUESTS') {
+        var $cqSub = $('<div>').css({
+            'flex-basis': '100%', 'width': '100%',
+            'border-top': '1px solid #555', 'padding-top': '4px', 'margin-top': '2px',
+            'display': 'flex', 'align-items': 'center', 'gap': '6px', 'flex-wrap': 'wrap'
+        });
+        $('<span>').css({ 'font-size': '10px', 'color': '#aaa' })
+            .text('Opens Quest Book \u2014 pause for manual \u2713, then auto-continues. Wait (s):').appendTo($cqSub);
+        $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs qrCqWait',
+                            'min': '1', 'max': '120' })
+            .css({ 'width': '60px' })
+            .val(bsStep.claimWaitSecs || 5).appendTo($cqSub);
+        $row.append($cqSub);
+    }
+
     // Spacer
     $('<span>').css('flex', '1').appendTo($row);
 
@@ -1958,10 +2162,63 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
 function _qrBsUpdateControls() {
     var running = _qrRunning && _qrBsState && !_qrBsState.stopped;
     var paused  = _qrBsState && _qrBsState.stopped;
+    var minimized = _qrModal && !_qrModal.Body().is(':visible');
     $('#qrBsRunBtn').text(running ? '\u25a0 Running\u2026' : '\u25b6 Run Battle Script').prop('disabled', running);
     $('#qrBsStopBtn').toggle(!!(running || paused));
     $('#qrBsContinueBtn').toggle(!!paused);
     $('#qrBsRestartBtn').toggle(!!paused);
+    // Footer mirror controls — only visible while minimized
+    $('#qrBsStopBtnFtr').toggle(minimized && !!(running || paused));
+    $('#qrBsContinueBtnFtr').toggle(minimized && !!paused);
+    $('#qrBsRestartBtnFtr').toggle(minimized && !!paused);
+    // Step progress panel — only while minimized and script active
+    var showProgress = minimized && !!(running || paused) && _qrBsState && _qrBsState.steps;
+    $('#qrBsStepProgress').toggle(!!showProgress);
+    if (showProgress && _qrBsState.activeIdx !== undefined) {
+        _qrBsUpdateStepProgress(_qrBsState.activeIdx, _qrBsState.steps);
+    }
+}
+
+function _qrBsUpdateStepProgress(idx, steps) {
+    var $p = $('#qrBsStepProgress');
+    if (!$p.length || !steps) { return; }
+    var TYPE_LABEL = {
+        MOVE: 'MOVE \u2192 garrison',       ATTACK: 'ATTACK \u00d7 building',
+        WAIT_ZONE: 'WAIT \u2014 arrives',     WAIT_AT_GARRISON: 'WAIT \u2014 ready',
+        WAIT_ATTACKING: 'WAIT \u2014 attacking', WAIT_GARRISON: 'WAIT \u2014 position',
+        WAIT_IDLE: 'WAIT \u2014 idle',        UNLOAD: 'UNLOAD army',
+        LOAD_ARMY: 'LOAD ARMY',               DELAY: 'DELAY',
+        COLLECTIBLES: 'COLLECT',              FILL_AND_RETURN: 'FILL \u2192 STAR',
+        CLAIM_QUESTS: 'CLAIM QUEST REWARDS'
+    };
+    function fmt(i) {
+        if (i < 0 || i >= steps.length) { return null; }
+        var s = steps[i];
+        var text = (i + 1) + '. ' + (TYPE_LABEL[s.type] || s.type);
+        if (s.generalName) { text += ' \u2014 ' + s.generalName; }
+        if (s.buildingDisplay && (s.type === 'MOVE' || s.type === 'ATTACK' || s.type === 'WAIT_GARRISON')) {
+            text += ' @ ' + s.buildingDisplay;
+        }
+        if (s.type === 'DELAY') { text += ' (' + (s.seconds || 5) + 's)'; }
+        return text;
+    }
+    $p.empty();
+    var prev = fmt(idx - 1), curr = fmt(idx), next = fmt(idx + 1);
+    if (prev !== null) {
+        $('<div>').css({ 'color': '#555', 'font-size': '10px', 'white-space': 'nowrap',
+                         'overflow': 'hidden', 'text-overflow': 'ellipsis' })
+            .text('\u25b2 ' + prev).appendTo($p);
+    }
+    $('<div>').css({ 'color': '#f0c040', 'font-size': '12px', 'font-weight': 'bold',
+                     'white-space': 'nowrap', 'overflow': 'hidden', 'text-overflow': 'ellipsis',
+                     'padding': '1px 0', 'border-top': prev ? '1px solid #333' : 'none',
+                     'border-bottom': next !== null ? '1px solid #333' : 'none' })
+        .text('\u25ba ' + (curr !== null ? curr : 'Complete')).appendTo($p);
+    if (next !== null) {
+        $('<div>').css({ 'color': '#555', 'font-size': '10px', 'white-space': 'nowrap',
+                         'overflow': 'hidden', 'text-overflow': 'ellipsis' })
+            .text('\u25bc ' + next).appendTo($p);
+    }
 }
 
 function _qrBsStop() {
@@ -1982,6 +2239,35 @@ function _qrRunBattleScript(startIdx) {
     }
     if (_qrRunning) { showGameAlert('Battle script is already running.'); return; }
 
+    // Pre-flight: every general must meet their stepMinArmy before the script can start
+    var preFlightErrors = [];
+    (profile.steps || []).forEach(function (s) {
+        if (!s.generalUID || !s.stepMinArmy) { return; }
+        var minKeys = Object.keys(s.stepMinArmy).filter(function (t) { return s.stepMinArmy[t] > 0; });
+        if (minKeys.length === 0) { return; }
+        var spec = _qrFindSpecByUID(s.generalUID);
+        if (!spec) {
+            preFlightErrors.push((s.generalName || s.generalUID) + ': general not found');
+            return;
+        }
+        var curArmy = {};
+        try {
+            spec.GetArmy().GetSquadsCollection_vector().forEach(function (sq) {
+                var t = sq.GetType ? sq.GetType() : '';
+                var a = sq.GetAmount ? sq.GetAmount() : 0;
+                if (t) { curArmy[t] = (curArmy[t] || 0) + a; }
+            });
+        } catch (e) {}
+        var genLabel = s.generalName || s.generalUID;
+        minKeys.forEach(function (t) {
+            var has = curArmy[t] || 0;
+            if (has < s.stepMinArmy[t]) {
+                preFlightErrors.push(genLabel + ': needs ' + s.stepMinArmy[t] + ' ' + t + ', has ' + has);
+            }
+        });
+    });
+    // Note: preFlightErrors are now handled async below — we attempt auto-load first
+
     startIdx = startIdx || 0;
     _qrBsState = { steps: profile.battleScript.slice(), stepIdx: startIdx, stopped: false, profile: profile };
     _qrRunning = true;
@@ -1998,12 +2284,15 @@ function _qrRunBattleScript(startIdx) {
     }
 
     function setActiveRow(i) {
+        if (state) { state.activeIdx = i; }
         $('#qrBsSteps .qrBsStep').css('outline', '');
         var $active = $('#qrBsSteps .qrBsStep[data-idx="' + i + '"]').css('outline', '2px solid #f0c040');
         if ($active.length) {
             try { $active[0].scrollIntoView({ block: 'nearest' }); } catch (e) {
                 try { $active[0].scrollIntoView(false); } catch (e2) {} }
         }
+        _qrBsUpdateStepProgress(i, state.steps);
+        _qrBsUpdateControls();
     }
 
     var state = _qrBsState;
@@ -2112,7 +2401,7 @@ function _qrRunBattleScript(startIdx) {
                         return atkMinKeys.filter(function (t) { return (cur[t] || 0) < atkMinArmy[t]; });
                     }
 
-                    // Load atkMinArmy onto the attacker; call onDone after 2s (time for server response)
+                    // Load atkMinArmy onto the attacker; poll until army confirmed (up to 10s) then call onDone
                     function atkLoadArmy(onDone) {
                         var sp = _qrFindSpecByUID(atkSpecUID);
                         if (!sp) { setTimeout(onDone, 2000); return; }
@@ -2126,8 +2415,17 @@ function _qrRunBattleScript(startIdx) {
                                 frLoad.unitSquads.addItem(dRes);
                             });
                             game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, frLoad, armyResponder);
-                        } catch (e) { game.chatMessage('ATTACK: load army error: ' + e, 'adventurer'); }
-                        setTimeout(onDone, 2000);
+                        } catch (e) { game.chatMessage('ATTACK: load army error: ' + e, 'adventurer'); setTimeout(onDone, 2000); return; }
+                        // Poll until the general's army reflects the load, or timeout after 10s
+                        var laWait = 0;
+                        var ivLoad = setInterval(function () {
+                            if (state.stopped) { clearInterval(ivLoad); return; }
+                            laWait++;
+                            if (laWait > 10 || atkGetShortfall().length === 0) {
+                                clearInterval(ivLoad);
+                                onDone();
+                            }
+                        }, 1000);
                     }
 
                     // Unload ALL profile generals (to free all units back to pool); call onDone when done
@@ -2163,25 +2461,35 @@ function _qrRunBattleScript(startIdx) {
 
                     // Start the attack and poll for departure confirmation
                     function doActualAttack() {
-                        var atkSpec2     = _qrFindSpecByUID(atkSpecUID);
-                        var atkOrigGrid  = atkSpec2 ? atkSpec2.GetGarrisonGridIdx() : 0;
+                        // Snapshot the general's current garrison grid before sending — leaving it means attack accepted
+                        var atkSpec0 = _qrFindSpecByUID(atkSpecUID);
+                        var atkOrigGrid = atkSpec0 ? atkSpec0.GetGarrisonGridIdx() : -1;
                         doSendAttack();
-                        game.chatMessage('ATTACK: ' + genName + ' \u00d7 ' + atkLabel + ' (waiting for departure\u2026)', 'adventurer');
+                        game.chatMessage('ATTACK: ' + genName + ' \u00d7 ' + atkLabel + ' (waiting for departure or battle\u2026)', 'adventurer');
                         var atkRetryTicks = 0;
                         var ivAtkRetry = setInterval(function () {
                             if (state.stopped) { clearInterval(ivAtkRetry); return; }
                             try {
                                 var sp2 = _qrFindSpecByUID(atkSpecUID);
-                                if (!sp2) { clearInterval(ivAtkRetry); finish('ATTACK: general lost'); return; }
-                                var curGrid = sp2.GetGarrisonGridIdx();
-                                if (curGrid !== atkOrigGrid) {
+                                // Signal 1: general left their garrison (attack command accepted by server)
+                                var generalLeft = sp2 && sp2.GetGarrisonGridIdx() !== atkOrigGrid;
+                                // Signal 2: camp is no longer intercepting (battle started or camp defeated)
+                                var campDone = false;
+                                try {
+                                    game.zone.mStreetDataMap.GetBuildings_vector().forEach(function (b) {
+                                        if (b && typeof b.GetGrid === 'function' && b.GetGrid() === grid) {
+                                            if (!b.IsReadyToIntercept || !b.IsReadyToIntercept()) { campDone = true; }
+                                        }
+                                    });
+                                } catch (e) {}
+                                if (generalLeft || campDone) {
                                     clearInterval(ivAtkRetry);
-                                    game.chatMessage('ATTACK: ' + genName + ' has left garrison \u2014 attack confirmed.', 'adventurer');
+                                    game.chatMessage('ATTACK: ' + genName + ' \u2014 ' + atkLabel + ' attack accepted.', 'adventurer');
                                     setTimeout(runNextStep, 500);
                                     return;
                                 }
                                 atkRetryTicks++;
-                                if (atkRetryTicks % 60 === 0) { // 30s (60 × 500ms)
+                                if (atkRetryTicks % 60 === 0) { // 30s (60 × 500ms) — route genuinely blocked
                                     game.chatMessage('ATTACK: route still blocked for ' + genName + ', retrying\u2026', 'adventurer');
                                     doSendAttack();
                                 }
@@ -2531,26 +2839,51 @@ function _qrRunBattleScript(startIdx) {
                                     setTimeout(runNextStep, 1000);
                                     return;
                                 }
-                                game.chatMessage('FILL_AND_RETURN: all generals filled — sending home...', 'adventurer');
-                                var frStarQ = new TimedQueue(1500);
-                                var frHomeZoneId = game.gi.mCurrentPlayer.GetHomeZoneId();
-                                frUIDs.forEach(function (uid) {
-                                    frStarQ.add(function () {
-                                        if (state.stopped) { return; }
-                                        var spec = _qrFindSpecByUID(uid);
-                                        if (!spec) { return; }
-                                        var nm = '';
-                                        try { nm = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
-                                        try {
-                                            armyServices.specialist.sendToZone(spec, frHomeZoneId);
-                                            game.chatMessage('FILL_AND_RETURN: ' + nm + ' \u2192 sent home.', 'adventurer');
-                                        } catch (e) {
-                                            game.chatMessage('FILL_AND_RETURN: send-home error for ' + nm + ': ' + e, 'adventurer');
+                                game.chatMessage('FILL_AND_RETURN: all generals filled — waiting for unit pool to clear...', 'adventurer');
+                                // Poll until zone free army is empty (all units assigned), then send home
+                                var frWaitTicks = 0;
+                                var ivFrPool = setInterval(function () {
+                                    if (state.stopped) { clearInterval(ivFrPool); return; }
+                                    frWaitTicks++;
+                                    var freeCount = 0;
+                                    try {
+                                        game.zone.GetArmy(game.gi.mCurrentPlayer.GetPlayerId())
+                                            .GetSquadsCollection_vector()
+                                            .forEach(function (sq) {
+                                                if (sq.GetType && sq.GetType().toLowerCase().indexOf('expedition') < 0) {
+                                                    freeCount += (sq.GetAmount ? sq.GetAmount() : 0);
+                                                }
+                                            });
+                                    } catch (e) {}
+                                    if (freeCount === 0 || frWaitTicks > 30) { // 30 × 3s = 90s max
+                                        clearInterval(ivFrPool);
+                                        if (freeCount > 0) {
+                                            game.chatMessage('FILL_AND_RETURN: timeout — ' + freeCount + ' units still unassigned, proceeding anyway.', 'adventurer');
                                         }
-                                    });
-                                });
-                                frStarQ.add(function () { if (!state.stopped) { runNextStep(); } });
-                                frStarQ.run();
+                                        game.chatMessage('FILL_AND_RETURN: unit pool clear — sending home...', 'adventurer');
+                                        var frStarQ = new TimedQueue(1500);
+                                        var frHomeZoneId = game.gi.mCurrentPlayer.GetHomeZoneId();
+                                        frUIDs.forEach(function (uid) {
+                                            frStarQ.add(function () {
+                                                if (state.stopped) { return; }
+                                                var spec = _qrFindSpecByUID(uid);
+                                                if (!spec) { return; }
+                                                var nm = '';
+                                                try { nm = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
+                                                try {
+                                                    armyServices.specialist.sendToZone(spec, frHomeZoneId);
+                                                    game.chatMessage('FILL_AND_RETURN: ' + nm + ' \u2192 sent home.', 'adventurer');
+                                                } catch (e) {
+                                                    game.chatMessage('FILL_AND_RETURN: send-home error for ' + nm + ': ' + e, 'adventurer');
+                                                }
+                                            });
+                                        });
+                                        frStarQ.add(function () { if (!state.stopped) { runNextStep(); } });
+                                        frStarQ.run();
+                                    } else {
+                                        game.chatMessage('FILL_AND_RETURN: ' + freeCount + ' units still unassigned — waiting...', 'adventurer');
+                                    }
+                                }, 3000);
                                 return;
                             }
 
@@ -2564,13 +2897,20 @@ function _qrRunBattleScript(startIdx) {
                             var frGenName = '';
                             try { frGenName = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
 
-                            // Try to get actual max capacity from multiple sources; fall back to 200
-                            var frMaxCap = 200;
-                            try { var mx = spec.GetArmy().GetMaxUnitsCount(); if (mx > 0) { frMaxCap = mx; } } catch (e) {}
-                            try { if (frMaxCap <= 200) { var mx2 = spec.mSpecialistDefinition.maxUnitsCount; if (mx2 > 0) { frMaxCap = mx2; } } } catch (e) {}
-                            try { if (frMaxCap <= 200) { var mx3 = spec.GetSpecialistDefinition().maxUnitsCount; if (mx3 > 0) { frMaxCap = mx3; } } } catch (e) {}
-                            try { if (frMaxCap <= 200) { var mx4 = spec.GetSpecialistDefinition().GetMaxUnitsCount(); if (mx4 > 0) { frMaxCap = mx4; } } } catch (e) {}
-                            try { if (frMaxCap <= 200) { var mx5 = spec.mSpecialistDefinition.GetMaxUnitsCount(); if (mx5 > 0) { frMaxCap = mx5; } } } catch (e) {}
+                            // Look up capacity from profile generals section, fall back to auto-detect chain
+                            var frManualCap = 0;
+                            (state.profile.steps || []).some(function (s) {
+                                if (s.generalUID === uid && s.generalCapacity > 0) { frManualCap = s.generalCapacity; return true; }
+                                return false;
+                            });
+                            var frMaxCap = frManualCap || 200;
+                            if (!frManualCap) {
+                                try { var mx = spec.GetArmy().GetMaxUnitsCount(); if (mx > 0) { frMaxCap = mx; } } catch (e) {}
+                                try { if (frMaxCap <= 200) { var mx2 = spec.mSpecialistDefinition.maxUnitsCount; if (mx2 > 0) { frMaxCap = mx2; } } } catch (e) {}
+                                try { if (frMaxCap <= 200) { var mx3 = spec.GetSpecialistDefinition().maxUnitsCount; if (mx3 > 0) { frMaxCap = mx3; } } } catch (e) {}
+                                try { if (frMaxCap <= 200) { var mx4 = spec.GetSpecialistDefinition().GetMaxUnitsCount(); if (mx4 > 0) { frMaxCap = mx4; } } } catch (e) {}
+                                try { if (frMaxCap <= 200) { var mx5 = spec.mSpecialistDefinition.GetMaxUnitsCount(); if (mx5 > 0) { frMaxCap = mx5; } } } catch (e) {}
+                            }
 
                             // Greedily build fill army from our running pool snapshot
                             var frArmy = {};
@@ -2607,7 +2947,7 @@ function _qrRunBattleScript(startIdx) {
                                 return;
                             }
 
-                            // Step 2: After 2s, load new army
+                            // Step 2: After 10s, load new army
                             setTimeout(function () {
                                 if (state.stopped) { return; }
                                 try {
@@ -2629,9 +2969,9 @@ function _qrRunBattleScript(startIdx) {
                                 } catch (e) {
                                     game.chatMessage('FILL_AND_RETURN: load error for ' + frGenName + ': ' + e, 'adventurer');
                                 }
-                                // Step 3: Wait 2s then process next general
-                                setTimeout(function () { if (!state.stopped) { frProcessNext(); } }, 2000);
-                            }, 2000);
+                                // Step 3: Wait 10s then process next general
+                                setTimeout(function () { if (!state.stopped) { frProcessNext(); } }, 10000);
+                            }, 10000);
                         }
 
                         frProcessNext();
@@ -2655,55 +2995,27 @@ function _qrRunBattleScript(startIdx) {
                         }
                         game.chatMessage('CLAIM_QUESTS: ' + cqFinished.length + ' finished quest(s) to claim.', 'adventurer');
 
-                        // Build set of trigger building names from all finished quests
-                        var cqTriggerNames = {};
-                        cqFinished.forEach(function (q) {
-                            try {
-                                $.each(q.mQuestDefinition.questTriggers_vector, function (i, trig) {
-                                    if (trig && trig.name_string) { cqTriggerNames[trig.name_string] = true; }
-                                });
-                            } catch (e) {}
-                        });
-                        var cqTrigList = Object.keys(cqTriggerNames);
-                        game.chatMessage('CLAIM_QUESTS [diag] trigger names: ' + (cqTrigList.length ? cqTrigList.join(', ') : 'none'), 'adventurer');
-
-                        // Find those buildings on the current zone map
-                        var cqTrigBuildings = [];
-                        if (cqTrigList.length > 0) {
-                            try {
-                                game.gi.mCurrentPlayerZone.mStreetDataMap.GetBuildings_vector().forEach(function (b) {
-                                    if (!b) { return; }
-                                    var bName = '';
-                                    try { bName = b.GetBuildingName_string ? b.GetBuildingName_string() : ''; } catch (e) {}
-                                    if (bName && cqTriggerNames[bName]) { cqTrigBuildings.push(b); }
-                                });
-                            } catch (e) {}
-                        }
-
+                        var cqWaitSecs = parseInt(step.claimWaitSecs, 10) || 5;
                         var cqClaimQueue = new TimedQueue(1200);
 
-                        if (cqTrigBuildings.length > 0) {
-                            // Primary: SelectBuilding on each trigger building — same mechanism the game uses
-                            game.chatMessage('CLAIM_QUESTS: selecting ' + cqTrigBuildings.length + ' trigger building(s)...', 'adventurer');
-                            cqTrigBuildings.forEach(function (b) {
-                                cqClaimQueue.add(function () {
-                                    if (state.stopped) { return; }
-                                    try { game.gi.SelectBuilding(b); } catch (e) {}
-                                });
+                        // Minimize window so the Quest Book is accessible, open each dialog, wait, then restore
+                        _qrMinimizeModal();
+                        game.chatMessage('CLAIM_QUESTS: window minimized — confirm quest(s) in the Quest Book, auto-continuing in ' + (cqWaitSecs * cqFinished.length) + 's...', 'adventurer');
+                        cqFinished.forEach(function (q) {
+                            cqClaimQueue.add(function () {
+                                if (state.stopped) { return; }
+                                try { cqMgr.finishQuest(q); } catch (e) {
+                                    game.chatMessage('CLAIM_QUESTS: finishQuest error: ' + e, 'adventurer');
+                                }
                             });
-                        } else {
-                            // Fallback: mgr.finishQuest per quest (may open a dialog client-side)
-                            game.chatMessage('CLAIM_QUESTS: no trigger buildings found — trying mgr.finishQuest fallback...', 'adventurer');
-                            cqFinished.forEach(function (q) {
-                                cqClaimQueue.add(function () {
-                                    if (state.stopped) { return; }
-                                    try { cqMgr.finishQuest(q); } catch (e) {}
-                                    game.chatMessage('CLAIM_QUESTS: finishQuest called.', 'adventurer');
-                                });
-                            });
-                        }
-
-                        cqClaimQueue.add(function () { if (!state.stopped) { runNextStep(); } });
+                            cqClaimQueue.add(function () {
+                                // just pause — user clicks ✓ manually
+                            }, cqWaitSecs * 1000);
+                        });
+                        cqClaimQueue.add(function () {
+                            _qrRestoreModal();
+                            if (!state.stopped) { runNextStep(); }
+                        });
                         cqClaimQueue.run();
                     } catch (e) {
                         game.chatMessage('CLAIM_QUESTS error: ' + e, 'adventurer');
@@ -2720,8 +3032,88 @@ function _qrRunBattleScript(startIdx) {
         }
     }
 
-    game.chatMessage('BattleScript: starting from step ' + (startIdx + 1) + ' (' + state.steps.length + ' total)', 'adventurer');
-    runNextStep();
+    // Pre-flight: if any general is below minimum army, try to auto-load before starting
+    function pfCheckErrors() {
+        var errs = [];
+        (profile.steps || []).forEach(function (s) {
+            if (!s.generalUID || !s.stepMinArmy) { return; }
+            var minKeys = Object.keys(s.stepMinArmy).filter(function (t) { return s.stepMinArmy[t] > 0; });
+            if (minKeys.length === 0) { return; }
+            var label = s.generalName || s.generalUID;
+            var spec = _qrFindSpecByUID(s.generalUID);
+            if (!spec) { errs.push(label + ': general not found'); return; }
+            var cur = {};
+            try { spec.GetArmy().GetSquadsCollection_vector().forEach(function (sq) { var t = sq.GetType ? sq.GetType() : ''; var a = sq.GetAmount ? sq.GetAmount() : 0; if (t) { cur[t] = (cur[t] || 0) + a; } }); } catch (e) {}
+            minKeys.forEach(function (t) {
+                if ((cur[t] || 0) < s.stepMinArmy[t]) {
+                    errs.push(label + ': needs ' + s.stepMinArmy[t] + ' ' + t + ', has ' + (cur[t] || 0));
+                }
+            });
+        });
+        return errs;
+    }
+
+    function pfLaunch() {
+        game.chatMessage('BattleScript: starting from step ' + (startIdx + 1) + ' (' + state.steps.length + ' total)', 'adventurer');
+        runNextStep();
+    }
+
+    var pfInitErrors = pfCheckErrors();
+    if (pfInitErrors.length === 0) {
+        // All armies already met — start immediately
+        pfLaunch();
+    } else {
+        // Attempt to auto-load minimum army for each general that is below
+        game.chatMessage('BattleScript: pre-flight \u2014 loading armies for ' + pfInitErrors.length + ' shortfall(s)\u2026', 'adventurer');
+        var pfLoadQ = new TimedQueue(2000);
+        (profile.steps || []).forEach(function (s) {
+            if (!s.generalUID || !s.stepMinArmy) { return; }
+            var minKeys = Object.keys(s.stepMinArmy).filter(function (t) { return s.stepMinArmy[t] > 0; });
+            if (minKeys.length === 0) { return; }
+            var spec = _qrFindSpecByUID(s.generalUID);
+            if (!spec) { return; }
+            var cur = {};
+            try { spec.GetArmy().GetSquadsCollection_vector().forEach(function (sq) { var t = sq.GetType ? sq.GetType() : ''; var a = sq.GetAmount ? sq.GetAmount() : 0; if (t) { cur[t] = (cur[t] || 0) + a; } }); } catch (e) {}
+            var needsLoad = minKeys.some(function (t) { return (cur[t] || 0) < s.stepMinArmy[t]; });
+            if (!needsLoad) { return; }
+            pfLoadQ.add(function () {
+                try {
+                    var spec2 = _qrFindSpecByUID(s.generalUID);
+                    if (!spec2) { return; }
+                    var vo = new dRaiseArmyVODef();
+                    vo.armyHolderSpecialistVO = spec2.CreateSpecialistVOFromSpecialist();
+                    minKeys.forEach(function (t) {
+                        var res = new dResourceVODef();
+                        res.name_string = t;
+                        res.amount = s.stepMinArmy[t];
+                        vo.unitSquads.addItem(res);
+                    });
+                    game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, vo, armyResponder);
+                    game.chatMessage('BattleScript: pre-flight loading army for ' + (s.generalName || s.generalUID) + '\u2026', 'adventurer');
+                } catch (e) { game.chatMessage('BattleScript: pre-flight load error: ' + e, 'adventurer'); }
+            });
+        });
+        // Poll up to ~14s for armies to be confirmed, then launch or fail
+        pfLoadQ.add(function () {
+            var pfWait = 0;
+            var ivPf = setInterval(function () {
+                if (state.stopped) { clearInterval(ivPf); return; }
+                pfWait++;
+                var finalErrors = pfCheckErrors();
+                if (finalErrors.length === 0 || pfWait > 7) { // 7 \u00d7 2s = ~14s
+                    clearInterval(ivPf);
+                    if (finalErrors.length > 0) {
+                        showGameAlert('Cannot start \u2014 army requirements not met after auto-load:\n\n' + finalErrors.join('\n'));
+                        finish(null);
+                        return;
+                    }
+                    game.chatMessage('BattleScript: armies confirmed \u2014 starting.', 'adventurer');
+                    pfLaunch();
+                }
+            }, 2000);
+        });
+        pfLoadQ.run();
+    }
 }
 
 })();
