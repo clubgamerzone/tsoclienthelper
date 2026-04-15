@@ -130,5 +130,12 @@
       "longDesc": "Allows add missed translations or change translations of existing items.",
       "author": "SirriS",
       "url": ""
+  },
+  "user_quest_runner.js": {
+      "name": "Quest Runner",
+      "shortDesc": "Automate quest general dispatch.",
+      "longDesc": "Define profiles with multiple generals, their army compositions, and destination adventures. Run a profile to automatically load troops and dispatch all generals to their adventures with a single click.",
+      "author": "custom",
+      "url": ""
   }
 }
