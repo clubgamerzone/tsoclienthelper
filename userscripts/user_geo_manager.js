@@ -9,6 +9,7 @@ var _gmModalInitialized    = false;
 var _gmRefreshInterval     = null;
 var _gmAutoBuildInterval   = null;
 var _gmAutoBuildSeenGrids  = null;   // null = not yet initialized (first tick)
+var _gmGeoIdleSince        = {};     // UID -> timestamp (ms) when geo first seen idle; for grace period
 
 // Deposit resource name --> geologist task string 'taskType,subTaskId'
 // Values from geoDropSpec in 4-specialists.js
@@ -95,6 +96,17 @@ function _gmStartAutoBuildWatcher() {
                 buildIdx++;
             });
 
+            // Track per-geo idle-since time for grace period (10s after returning, don't auto-send)
+            var now = Date.now();
+            data.geos.forEach(function(g) {
+                if (g.IsIdle) {
+                    if (!_gmGeoIdleSince[g.UID]) _gmGeoIdleSince[g.UID] = now;
+                } else {
+                    delete _gmGeoIdleSince[g.UID];
+                }
+            });
+            var _graceMs = 10000;  // 10s grace period before sending a freshly-returned geo
+
             // Shared state for both send loops
             var autoSendUsed = [];
             var autoSendDelay = 0;
@@ -117,6 +129,7 @@ function _gmStartAutoBuildWatcher() {
                 if (searching >= deplCap) return;  // already enough geos searching for this ore
                 var best = _gmBestGeo(data.geos, m.OreName, autoSendUsed);
                 if (!best || !best.IsIdle) return;
+                if (now - (_gmGeoIdleSince[best.UID] || 0) < _graceMs) return;  // geo just returned, wait
                 if (_gmQuarryOres[m.OreName]) _autoQuarryOreSent[m.OreName] = true;
                 _autoTotalSent++;
                 autoSendDelay += 1500;
@@ -145,9 +158,11 @@ function _gmStartAutoBuildWatcher() {
                 });
 
                 // Among idle, not-already-reserved geos: keep only those whose search time >= mineLeft
+                // and who have been idle for at least the grace period (not freshly returned)
                 var validCandidates = [];
                 data.geos.forEach(function(g) {
                     if (!g.IsIdle || autoSendUsed.indexOf(g.UID) >= 0) return;
+                    if (now - (_gmGeoIdleSince[g.UID] || 0) < _graceMs) return;  // geo just returned, wait
                     var ms = _gmSearchMs(g.Spec, m.OreName);
                     if (ms >= mineMsLeft) validCandidates.push({ g: g, ms: ms });
                 });
@@ -546,9 +561,22 @@ function _gmCollectData() {
         if (m.Secs > 0) activeMinesByOre[m.OreName] = (activeMinesByOre[m.OreName] || 0) + 1;
     });
 
+    // Active quarry deposits: scan depositMap directly (quarry buildings may not resolve via building loop)
+    var activeQuarryByOre = {};
+    for (var qg in depositMap) {
+        if (!depositMap.hasOwnProperty(qg)) continue;
+        try {
+            var qd = depositMap[qg];
+            var qOre = qd.GetName_string();
+            if (_gmQuarryOres[qOre] && _gmDepositTask[qOre] && qd.GetAmount() > 0) {
+                activeQuarryByOre[qOre] = (activeQuarryByOre[qOre] || 0) + 1;
+            }
+        } catch (e) {}
+    }
+
     return { geos: geos, mines: mines, foundMines: foundMines, depletedMines: depletedMines, depleted: depleted,
              searchingByOre: searchingByOre, depletedCountByOre: depletedCountByOre, resources: resources,
-             activeMinesByOre: activeMinesByOre };
+             activeMinesByOre: activeMinesByOre, activeQuarryByOre: activeQuarryByOre };
 }
 
 // ---- Pick best idle geologist for an ore type ----
@@ -571,44 +599,22 @@ function _gmBestGeo(geos, oreName, excludeUIDs) {
     return best;
 }
 
-// ---- Smart Send: send idle geologists to mines with < 2h depletion ----
-function _gmSmartSendAll() {
-    try {
-        var data = _gmCollectData();
-        var used = [];
-        var queue = [];
-
-        data.mines.forEach(function (m) {
-            if (m.Secs === 0 || m.Secs > 7200) return;   // only < 2h mines
-            var g = _gmBestGeo(data.geos, m.OreName, used);
-            if (!g) return;
-            used.push(g.UID);
-            queue.push({ spec: g.Spec, ore: m.OreName, geoName: g.Name, mineName: m.Name });
-        });
-
-        if (queue.length === 0) {
-            game.showAlert('No mines < 2h need a geologist, or no idle geologists available.');
-            return;
-        }
-        queue.forEach(function (item, idx) {
-            setTimeout(function () { _gmSendGeo(item.spec, item.ore); }, idx * 1200);
-        });
-        setTimeout(function () { _gmRefresh(); }, queue.length * 1200 + 800);
-        game.showAlert('Sending ' + queue.length + ' geologist(s) to urgent mines...');
-    } catch (e) { game.showAlert('Smart send error: ' + e); }
-}
-
 // ---- Render data into modal ----
 function _gmRender(data) {
     var out = '<div class="container-fluid">';
     var idleCount = data.geos.filter(function (g) { return g.IsIdle; }).length;
 
-    // ------ Active mines summary ------
+    // ------ Active mines + quarries summary ------
     var activeByOre = {};
     data.mines.forEach(function (m) {
         if (m.Secs > 0 && _gmDepositTask[m.OreName]) {
             activeByOre[m.OreName] = (activeByOre[m.OreName] || 0) + 1;
         }
+    });
+    // Merge active quarry deposits (counted directly from depositMap in collectData)
+    var aqo = data.activeQuarryByOre || {};
+    Object.keys(aqo).forEach(function (ore) {
+        activeByOre[ore] = (activeByOre[ore] || 0) + aqo[ore];
     });
     var activeOreKeys = Object.keys(activeByOre);
     if (activeOreKeys.length > 0) {
@@ -810,7 +816,6 @@ function _gmRender(data) {
     var notUrgentMines = data.mines.slice();  // all active mines (urgent coloring handled per-row)
     var foundMines     = data.foundMines || [];
 
-    // Keep legacy alias so _gmSmartSendAll still works
     var otherMines = notUrgentMines;
 
     // ------ Mines: Not urgent ------
@@ -1209,9 +1214,6 @@ function _gmMenuHandler() {
                 $('<button>').attr({ id: 'gmRefreshBtn', 'class': 'btn btn-success' })
                              .text('Refresh').prop('outerHTML') +
                 '&nbsp;&nbsp;' +
-                $('<button>').attr({ id: 'gmSmartSendBtn', 'class': 'btn btn-warning' })
-                             .text('Smart Send (<2h)').prop('outerHTML') +
-                '&nbsp;&nbsp;' +
                 $('<button>').attr({ id: 'gmAutoSendToggle', 'class': 'btn btn-xs ' + (_gmAutoSendEnabled ? 'btn-success' : 'btn-danger') })
                              .text(_gmAutoSendEnabled ? 'Auto-Send: ON' : 'Auto-Send: OFF').prop('outerHTML') +
                 '&nbsp;Max/cycle:&nbsp;<input id="gmAutoSendMax" type="number" min="0" style="width:45px;text-align:center;display:inline-block" value="' + _gmAutoSendMax + '">&nbsp;<small style="color:#999">(0=&#8734;)</small>' +
@@ -1220,7 +1222,6 @@ function _gmMenuHandler() {
             );
 
             $('#gmRefreshBtn').click(function () { _gmRefresh(); });
-            $('#gmSmartSendBtn').click(function () { _gmSmartSendAll(); });
             $('#gmAutoSendToggle').click(function () {
                 _gmAutoSendEnabled = !_gmAutoSendEnabled;
                 try { storeSettings(_gmAutoSendEnabled, 'gmAutoSendEnabled'); } catch (e) {}

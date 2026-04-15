@@ -9,6 +9,7 @@ var _gmModalInitialized    = false;
 var _gmRefreshInterval     = null;
 var _gmAutoBuildInterval   = null;
 var _gmAutoBuildSeenGrids  = null;   // null = not yet initialized (first tick)
+var _gmGeoIdleSince        = {};     // UID -> timestamp (ms) when geo first seen idle; for grace period
 
 // Deposit resource name --> geologist task string 'taskType,subTaskId'
 // Values from geoDropSpec in 4-specialists.js
@@ -95,6 +96,17 @@ function _gmStartAutoBuildWatcher() {
                 buildIdx++;
             });
 
+            // Track per-geo idle-since time for grace period (10s after returning, don't auto-send)
+            var now = Date.now();
+            data.geos.forEach(function(g) {
+                if (g.IsIdle) {
+                    if (!_gmGeoIdleSince[g.UID]) _gmGeoIdleSince[g.UID] = now;
+                } else {
+                    delete _gmGeoIdleSince[g.UID];
+                }
+            });
+            var _graceMs = 10000;  // 10s grace period before sending a freshly-returned geo
+
             // Shared state for both send loops
             var autoSendUsed = [];
             var autoSendDelay = 0;
@@ -117,6 +129,7 @@ function _gmStartAutoBuildWatcher() {
                 if (searching >= deplCap) return;  // already enough geos searching for this ore
                 var best = _gmBestGeo(data.geos, m.OreName, autoSendUsed);
                 if (!best || !best.IsIdle) return;
+                if (now - (_gmGeoIdleSince[best.UID] || 0) < _graceMs) return;  // geo just returned, wait
                 if (_gmQuarryOres[m.OreName]) _autoQuarryOreSent[m.OreName] = true;
                 _autoTotalSent++;
                 autoSendDelay += 1500;
@@ -145,9 +158,11 @@ function _gmStartAutoBuildWatcher() {
                 });
 
                 // Among idle, not-already-reserved geos: keep only those whose search time >= mineLeft
+                // and who have been idle for at least the grace period (not freshly returned)
                 var validCandidates = [];
                 data.geos.forEach(function(g) {
                     if (!g.IsIdle || autoSendUsed.indexOf(g.UID) >= 0) return;
+                    if (now - (_gmGeoIdleSince[g.UID] || 0) < _graceMs) return;  // geo just returned, wait
                     var ms = _gmSearchMs(g.Spec, m.OreName);
                     if (ms >= mineMsLeft) validCandidates.push({ g: g, ms: ms });
                 });
