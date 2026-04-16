@@ -173,12 +173,17 @@ function _qrSave() {
 function _qrExportProfiles() {
     try {
         _qrSaveCurrentFromUI();
-        var json = JSON.stringify(_qrProfiles, null, '  ');
-        var f = new air.File(air.File.documentsDirectory.nativePath).resolvePath('quest_runner_profiles.json');
+        if (_qrSelectedIdx < 0 || _qrSelectedIdx >= _qrProfiles.length) {
+            showGameAlert('No profile selected to export.'); return;
+        }
+        var profile = _qrProfiles[_qrSelectedIdx];
+        var safeName = (profile.name || 'profile').replace(/[^\w\s\-]/g, '').replace(/\s+/g, '_');
+        var json = JSON.stringify(profile, null, '  ');
+        var f = new air.File(air.File.documentsDirectory.nativePath).resolvePath('qr_' + safeName + '.json');
         f.addEventListener(air.Event.COMPLETE, function () {
-            game.chatMessage('Quest Runner: profiles exported.', 'adventurer');
+            game.chatMessage('Quest Runner: "' + profile.name + '" exported.', 'adventurer');
         });
-        f.save(json, 'Save Quest Runner profiles');
+        f.save(json, 'Export profile');
     } catch (e) { showGameAlert('Export failed: ' + e); }
 }
 
@@ -190,24 +195,25 @@ function _qrImportProfiles() {
             ev.target.addEventListener(air.Event.COMPLETE, function (ev2) {
                 try {
                     var parsed = JSON.parse(ev2.target.data);
-                    if (!Array.isArray(parsed)) { showGameAlert('Import failed: file does not contain a profiles array.'); return; }
-                    // Merge: add profiles whose id does not already exist
+                    // Accept a single profile object (not an array)
+                    if (Array.isArray(parsed) || typeof parsed !== 'object' || !parsed.name) {
+                        showGameAlert('Import failed: file does not contain a single profile object.\nExport a profile first to see the expected format.'); return;
+                    }
+                    if (!parsed.id) { parsed.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+                    // If a profile with the same id already exists, give the import a fresh id
                     var existingIds = {};
                     _qrProfiles.forEach(function (p) { existingIds[p.id] = true; });
-                    var added = 0;
-                    parsed.forEach(function (p) {
-                        if (!p.id) { p.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
-                        if (!existingIds[p.id]) { _qrProfiles.push(p); added++; }
-                    });
+                    if (existingIds[parsed.id]) { parsed.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+                    _qrProfiles.push(parsed);
                     _qrSave();
                     _qrSelectedIdx = _qrProfiles.length - 1;
                     _qrRenderAll();
-                    game.chatMessage('Quest Runner: imported ' + added + ' profile(s).', 'adventurer');
+                    game.chatMessage('Quest Runner: "' + parsed.name + '" imported.', 'adventurer');
                 } catch (e) { showGameAlert('Import parse error: ' + e); }
             });
             ev.target.load();
         });
-        f.browseForOpen('Import Quest Runner profiles', [filter]);
+        f.browseForOpen('Import profile', [filter]);
     } catch (e) { showGameAlert('Import failed: ' + e); }
 }
 
@@ -1378,81 +1384,126 @@ function _qrRun() {
         }, 2000);
     }
 
-    // ── PHASE 1: load armies → poll confirmation → check OK → proceed or stop ──
+    // ── PHASE 1: for each general with stepMinArmy configured, do: unload → load → poll confirm ──
+    // stepMinArmy (left "in Army for General" column) is the army to load at dispatch.
+    // Generals are processed ONE AT A TIME before any dispatch happens.
     var stepsWithArmy = profile.steps.filter(function (s) {
-        return s.army && Object.keys(s.army).some(function (k) { return s.army[k] > 0; });
+        return s.stepMinArmy && Object.keys(s.stepMinArmy).some(function (k) { return s.stepMinArmy[k] > 0; });
     });
 
     if (stepsWithArmy.length === 0) {
-        // No armies configured — skip straight to placing the adventure
-        game.chatMessage('Adventurer: no armies configured \u2014 skipping army load\u2026', 'adventurer');
+        game.chatMessage('Adventurer: no dispatch armies configured \u2014 skipping army load\u2026', 'adventurer');
         doPlaceAndWaitZone();
         return;
     }
 
-    game.chatMessage('Adventurer: loading armies for ' + stepsWithArmy.length + ' general(s)\u2026', 'adventurer');
-    var armyLoadQ = new TimedQueue(1500);
+    game.chatMessage('Adventurer: loading armies for ' + stepsWithArmy.length + ' general(s), one at a time\u2026', 'adventurer');
 
-    stepsWithArmy.forEach(function (step) {
-        armyLoadQ.add(function () {
-            var spec = _qrFindSpecByUID(step.generalUID);
-            if (!spec) {
-                game.chatMessage('Adventurer: general not found for army load \u2014 ' + (step.generalName || step.generalUID), 'adventurer');
-                return;
-            }
-            var nm = ''; try { nm = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
+    // Process generals sequentially: armyStepIdx advances after each one is confirmed
+    var armyStepIdx = 0;
+
+    function doLoadNextGeneral() {
+        if (armyStepIdx >= stepsWithArmy.length) {
+            // All generals confirmed — move on
+            game.chatMessage('Adventurer: all armies confirmed \u2713 \u2014 placing adventure\u2026', 'adventurer');
+            doPlaceAndWaitZone();
+            return;
+        }
+
+        var step = stepsWithArmy[armyStepIdx];
+        var profileStepIdx = profile.steps.indexOf(step);
+        var spec = _qrFindSpecByUID(step.generalUID);
+        if (!spec) {
+            abortRun('Adventurer: general not found for army load \u2014 ' + (step.generalName || step.generalUID));
+            return;
+        }
+        var nm = ''; try { nm = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
+
+        // Use stepMinArmy (left "in Army for General" column) as the dispatch army
+        var targetArmy = step.stepMinArmy;
+        var targetKeys = Object.keys(targetArmy).filter(function (k) { return targetArmy[k] > 0; });
+
+        // Helper: read the general's current live army
+        function getLiveArmy(s) {
+            var cur = {};
             try {
-                var vo = new dRaiseArmyVODef();
-                vo.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
-                Object.keys(step.army).forEach(function (type) {
-                    if (!(step.army[type] > 0)) { return; }
+                s.GetArmy().GetSquadsCollection_vector().forEach(function (sq) {
+                    var t = sq.GetType ? sq.GetType() : '';
+                    var a = sq.GetAmount ? sq.GetAmount() : 0;
+                    if (t) { cur[t] = (cur[t] || 0) + a; }
+                });
+            } catch (e) {}
+            return cur;
+        }
+
+        // Helper: check if general's current army meets target
+        function armyMet(s) {
+            var cur = getLiveArmy(s);
+            return targetKeys.every(function (t) { return (cur[t] || 0) >= targetArmy[t]; });
+        }
+
+        // Step 1: unload this general (so the pool is free and the load is clean)
+        game.chatMessage('Adventurer [' + nm + ']: unloading before load\u2026', 'adventurer');
+        try {
+            var voUnload = new dRaiseArmyVODef();
+            voUnload.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
+            // empty unitSquads = unload all
+            game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, voUnload, armyResponder);
+        } catch (e) {
+            game.chatMessage('Adventurer [' + nm + ']: unload error: ' + e, 'adventurer');
+            // continue anyway
+        }
+
+        // Step 2: after 3s, send the load
+        setTimeout(function () {
+            var spec2 = _qrFindSpecByUID(step.generalUID);
+            if (!spec2) { abortRun('General ' + nm + ' not found after unload.'); return; }
+            game.chatMessage('Adventurer [' + nm + ']: loading army\u2026', 'adventurer');
+            try {
+                var voLoad = new dRaiseArmyVODef();
+                voLoad.armyHolderSpecialistVO = spec2.CreateSpecialistVOFromSpecialist();
+                targetKeys.forEach(function (type) {
                     var res = new dResourceVODef();
                     res.name_string = type;
-                    res.amount = step.army[type];
-                    vo.unitSquads.addItem(res);
+                    res.amount = targetArmy[type];
+                    voLoad.unitSquads.addItem(res);
                 });
-                game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, vo);
-                game.chatMessage('Adventurer: loading army for ' + nm + '\u2026', 'adventurer');
+                game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, voLoad, armyResponder);
             } catch (e) {
-                game.chatMessage('Adventurer army load error for ' + nm + ': ' + e, 'adventurer');
+                abortRun('Army load error for ' + nm + ': ' + e);
+                return;
             }
-        });
-    });
 
-    // After all loads sent, poll until each general's army is confirmed (up to 30s), then check OK
-    armyLoadQ.add(function () {
-        game.chatMessage('Adventurer: verifying armies\u2026', 'adventurer');
-        var armyWait = 0;
-        var ivArmy = setInterval(function () {
-            armyWait++;
-            var armyErrors = [];
-            stepsWithArmy.forEach(function (step, i) {
-                var spec = _qrFindSpecByUID(step.generalUID);
-                if (!spec) { armyErrors.push((step.generalName || step.generalUID) + ': general not found'); return; }
-                if (!stepHasArmy(spec, step)) {
-                    var nm = ''; try { nm = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) { nm = step.generalUID; }
-                    var cur = {};
-                    try { spec.GetArmy().GetSquadsCollection_vector().forEach(function (sq) { var t = sq.GetType ? sq.GetType() : ''; var a = sq.GetAmount ? sq.GetAmount() : 0; if (t) { cur[t] = (cur[t] || 0) + a; } }); } catch (e2) {}
-                    Object.keys(step.army).forEach(function (t) {
-                        if (step.army[t] > 0 && (cur[t] || 0) < step.army[t]) {
-                            armyErrors.push(nm + ': needs ' + step.army[t] + ' ' + t + ', has ' + (cur[t] || 0));
-                        }
-                    });
-                    highlightStepRed(i);
+            // Step 3: poll every 2s until army confirmed (up to 30s), then advance to next general
+            var pollTick = 0;
+            var ivConfirm = setInterval(function () {
+                pollTick++;
+                var s3 = _qrFindSpecByUID(step.generalUID);
+                if (!s3) { clearInterval(ivConfirm); abortRun('General ' + nm + ' not found during army confirm.'); return; }
+
+                var cur = getLiveArmy(s3);
+                var shortfall = targetKeys.filter(function (t) { return (cur[t] || 0) < targetArmy[t]; });
+
+                if (shortfall.length === 0) {
+                    clearInterval(ivConfirm);
+                    var detail = targetKeys.map(function (t) { return cur[t] + ' ' + t; }).join(', ');
+                    game.chatMessage('Adventurer [' + nm + ']: army confirmed \u2713 (' + detail + ')', 'adventurer');
+                    armyStepIdx++;
+                    doLoadNextGeneral();
+                } else if (pollTick > 15) { // 15 \u00d7 2s = 30s
+                    clearInterval(ivConfirm);
+                    var missing = shortfall.map(function (t) { return 'needs ' + targetArmy[t] + ' ' + t + ', has ' + (cur[t] || 0); });
+                    if (profileStepIdx >= 0) { highlightStepRed(profileStepIdx); }
+                    abortRun(nm + ' army not confirmed after 30s:\n' + missing.join('\n'));
+                } else {
+                    var missing2 = shortfall.map(function (t) { return targetArmy[t] + ' ' + t; });
+                    game.chatMessage('Adventurer [' + nm + ']: waiting for army (' + missing2.join(', ') + ')\u2026 (' + (pollTick * 2) + 's)', 'adventurer');
                 }
-            });
-            if (armyErrors.length === 0) {
-                clearInterval(ivArmy);
-                game.chatMessage('Adventurer: armies OK \u2713 \u2014 placing adventure\u2026', 'adventurer');
-                doPlaceAndWaitZone();
-            } else if (armyWait > 15) { // 15 \u00d7 2s = 30s timeout
-                clearInterval(ivArmy);
-                abortRun('Army load failed \u2014 cannot proceed:\n\n' + armyErrors.join('\n'));
-            }
-        }, 2000);
-    }, 1500);
+            }, 2000);
+        }, 3000);
+    }
 
-    armyLoadQ.run();
+    doLoadNextGeneral();
 }
 
 // ============================================================
@@ -2239,35 +2290,6 @@ function _qrRunBattleScript(startIdx) {
     }
     if (_qrRunning) { showGameAlert('Battle script is already running.'); return; }
 
-    // Pre-flight: every general must meet their stepMinArmy before the script can start
-    var preFlightErrors = [];
-    (profile.steps || []).forEach(function (s) {
-        if (!s.generalUID || !s.stepMinArmy) { return; }
-        var minKeys = Object.keys(s.stepMinArmy).filter(function (t) { return s.stepMinArmy[t] > 0; });
-        if (minKeys.length === 0) { return; }
-        var spec = _qrFindSpecByUID(s.generalUID);
-        if (!spec) {
-            preFlightErrors.push((s.generalName || s.generalUID) + ': general not found');
-            return;
-        }
-        var curArmy = {};
-        try {
-            spec.GetArmy().GetSquadsCollection_vector().forEach(function (sq) {
-                var t = sq.GetType ? sq.GetType() : '';
-                var a = sq.GetAmount ? sq.GetAmount() : 0;
-                if (t) { curArmy[t] = (curArmy[t] || 0) + a; }
-            });
-        } catch (e) {}
-        var genLabel = s.generalName || s.generalUID;
-        minKeys.forEach(function (t) {
-            var has = curArmy[t] || 0;
-            if (has < s.stepMinArmy[t]) {
-                preFlightErrors.push(genLabel + ': needs ' + s.stepMinArmy[t] + ' ' + t + ', has ' + has);
-            }
-        });
-    });
-    // Note: preFlightErrors are now handled async below — we attempt auto-load first
-
     startIdx = startIdx || 0;
     _qrBsState = { steps: profile.battleScript.slice(), stepIdx: startIdx, stopped: false, profile: profile };
     _qrRunning = true;
@@ -2467,6 +2489,9 @@ function _qrRunBattleScript(startIdx) {
                         doSendAttack();
                         game.chatMessage('ATTACK: ' + genName + ' \u00d7 ' + atkLabel + ' (waiting for departure or battle\u2026)', 'adventurer');
                         var atkRetryTicks = 0;
+                        var atkRouteRetries = 0; // counts full 30s blocked intervals
+                        // Number of generals in profile = how many steps to rewind when route is permanently blocked
+                        var atkRewindSteps = Math.max(1, (state.profile.steps || []).length);
                         var ivAtkRetry = setInterval(function () {
                             if (state.stopped) { clearInterval(ivAtkRetry); return; }
                             try {
@@ -2489,9 +2514,25 @@ function _qrRunBattleScript(startIdx) {
                                     return;
                                 }
                                 atkRetryTicks++;
-                                if (atkRetryTicks % 60 === 0) { // 30s (60 × 500ms) — route genuinely blocked
-                                    game.chatMessage('ATTACK: route still blocked for ' + genName + ', retrying\u2026', 'adventurer');
-                                    doSendAttack();
+                                if (atkRetryTicks % 60 === 0) { // 30s (60 × 500ms) — route still blocked
+                                    atkRouteRetries++;
+                                    if (atkRouteRetries >= 10) {
+                                        // Route is permanently blocked — rewind N steps so MOVE steps can reposition
+                                        clearInterval(ivAtkRetry);
+                                        // state.stepIdx was already incremented past this ATTACK step,
+                                        // so rewind by atkRewindSteps to land on the MOVE steps before it
+                                        var rewindTo = Math.max(0, state.stepIdx - 1 - atkRewindSteps);
+                                        game.chatMessage(
+                                            'ATTACK: route blocked 10 times for ' + genName + ' \u2014 rewinding ' +
+                                            atkRewindSteps + ' step(s) to re-run positioning moves (going to step ' + (rewindTo + 1) + ')\u2026',
+                                            'adventurer'
+                                        );
+                                        state.stepIdx = rewindTo;
+                                        setTimeout(runNextStep, 1000);
+                                    } else {
+                                        game.chatMessage('ATTACK: route still blocked for ' + genName + ' (attempt ' + atkRouteRetries + '/10), retrying\u2026', 'adventurer');
+                                        doSendAttack();
+                                    }
                                 }
                             } catch (e) { clearInterval(ivAtkRetry); finish('ATTACK poll error: ' + e); }
                         }, 500);
@@ -2785,7 +2826,7 @@ function _qrRunBattleScript(startIdx) {
                 case 'FILL_AND_RETURN': {
                     game.chatMessage('FILL_AND_RETURN: filling all profile generals then returning to star...', 'adventurer');
                     try {
-                        // Collect unique general UIDs from all other steps in this profile (first occurrence order)
+                        // Collect unique general UIDs from all steps (first occurrence order)
                         var frUIDs = [];
                         var frSeen = {};
                         state.steps.forEach(function (s) {
@@ -2800,93 +2841,28 @@ function _qrRunBattleScript(startIdx) {
                             break;
                         }
 
-                        // Build a shared pool snapshot (free units + each general's current army,
-                        // since we'll unload before reloading).
-                        var frPool = {};
-                        try {
-                            game.zone.GetArmy(game.gi.mCurrentPlayer.GetPlayerId())
-                                .GetSquadsCollection_vector()
-                                .forEach(function (sq) {
-                                    var t = sq.GetType();
-                                    if (t && t.toLowerCase().indexOf('expedition') < 0) {
-                                        frPool[t] = (frPool[t] || 0) + sq.GetAmount();
-                                    }
-                                });
-                        } catch (e) {}
-                        // Include each general's current army in the pool (unloading returns these units)
-                        frUIDs.forEach(function (uid) {
-                            var s = _qrFindSpecByUID(uid);
-                            if (!s) { return; }
-                            try {
-                                s.GetArmy().GetSquadsCollection_vector().forEach(function (sq) {
-                                    var t = sq.GetType();
-                                    if (t && t.toLowerCase().indexOf('expedition') < 0) {
-                                        frPool[t] = (frPool[t] || 0) + sq.GetAmount();
-                                    }
-                                });
-                            } catch (e) {}
-                        });
+                        // Get manually-set capacity for a UID (generalCapacity field), no API fallback
+                        function frGetCap(uid) {
+                            var cap = 0;
+                            (state.profile.steps || []).some(function (s) {
+                                if (s.generalUID === uid && s.generalCapacity > 0) { cap = s.generalCapacity; return true; }
+                                return false;
+                            });
+                            return cap || 200;
+                        }
+
+                        // Sort highest capacity first so big generals get first pick of the live pool
+                        frUIDs.sort(function (a, b) { return frGetCap(b) - frGetCap(a); });
 
                         var frIdx = 0;
-                        var frFilledUIDs = []; // track generals that actually got filled
 
                         function frProcessNext() {
                             if (state.stopped) { return; }
                             if (frIdx >= frUIDs.length) {
-                                // All filled — send each to star menu with 1.5s gaps
-                                if (frFilledUIDs.length === 0) {
-                                    game.chatMessage('FILL_AND_RETURN: no generals were filled (no free units?). Proceeding.', 'adventurer');
-                                    setTimeout(runNextStep, 1000);
-                                    return;
-                                }
-                                game.chatMessage('FILL_AND_RETURN: all generals filled — waiting for unit pool to clear...', 'adventurer');
-                                // Poll until zone free army is empty (all units assigned), then send home
-                                var frWaitTicks = 0;
-                                var ivFrPool = setInterval(function () {
-                                    if (state.stopped) { clearInterval(ivFrPool); return; }
-                                    frWaitTicks++;
-                                    var freeCount = 0;
-                                    try {
-                                        game.zone.GetArmy(game.gi.mCurrentPlayer.GetPlayerId())
-                                            .GetSquadsCollection_vector()
-                                            .forEach(function (sq) {
-                                                if (sq.GetType && sq.GetType().toLowerCase().indexOf('expedition') < 0) {
-                                                    freeCount += (sq.GetAmount ? sq.GetAmount() : 0);
-                                                }
-                                            });
-                                    } catch (e) {}
-                                    if (freeCount === 0 || frWaitTicks > 30) { // 30 × 3s = 90s max
-                                        clearInterval(ivFrPool);
-                                        if (freeCount > 0) {
-                                            game.chatMessage('FILL_AND_RETURN: timeout — ' + freeCount + ' units still unassigned, proceeding anyway.', 'adventurer');
-                                        }
-                                        game.chatMessage('FILL_AND_RETURN: unit pool clear — sending home...', 'adventurer');
-                                        var frStarQ = new TimedQueue(1500);
-                                        var frHomeZoneId = game.gi.mCurrentPlayer.GetHomeZoneId();
-                                        frUIDs.forEach(function (uid) {
-                                            frStarQ.add(function () {
-                                                if (state.stopped) { return; }
-                                                var spec = _qrFindSpecByUID(uid);
-                                                if (!spec) { return; }
-                                                var nm = '';
-                                                try { nm = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
-                                                try {
-                                                    armyServices.specialist.sendToZone(spec, frHomeZoneId);
-                                                    game.chatMessage('FILL_AND_RETURN: ' + nm + ' \u2192 sent home.', 'adventurer');
-                                                } catch (e) {
-                                                    game.chatMessage('FILL_AND_RETURN: send-home error for ' + nm + ': ' + e, 'adventurer');
-                                                }
-                                            });
-                                        });
-                                        frStarQ.add(function () { if (!state.stopped) { runNextStep(); } });
-                                        frStarQ.run();
-                                    } else {
-                                        game.chatMessage('FILL_AND_RETURN: ' + freeCount + ' units still unassigned — waiting...', 'adventurer');
-                                    }
-                                }, 3000);
+                                game.chatMessage('FILL_AND_RETURN: all generals processed and sent home.', 'adventurer');
+                                setTimeout(runNextStep, 1000);
                                 return;
                             }
-
                             var uid = frUIDs[frIdx++];
                             var spec = _qrFindSpecByUID(uid);
                             if (!spec) {
@@ -2896,45 +2872,9 @@ function _qrRunBattleScript(startIdx) {
                             }
                             var frGenName = '';
                             try { frGenName = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
+                            var frMaxCap = frGetCap(uid);
 
-                            // Look up capacity from profile generals section, fall back to auto-detect chain
-                            var frManualCap = 0;
-                            (state.profile.steps || []).some(function (s) {
-                                if (s.generalUID === uid && s.generalCapacity > 0) { frManualCap = s.generalCapacity; return true; }
-                                return false;
-                            });
-                            var frMaxCap = frManualCap || 200;
-                            if (!frManualCap) {
-                                try { var mx = spec.GetArmy().GetMaxUnitsCount(); if (mx > 0) { frMaxCap = mx; } } catch (e) {}
-                                try { if (frMaxCap <= 200) { var mx2 = spec.mSpecialistDefinition.maxUnitsCount; if (mx2 > 0) { frMaxCap = mx2; } } } catch (e) {}
-                                try { if (frMaxCap <= 200) { var mx3 = spec.GetSpecialistDefinition().maxUnitsCount; if (mx3 > 0) { frMaxCap = mx3; } } } catch (e) {}
-                                try { if (frMaxCap <= 200) { var mx4 = spec.GetSpecialistDefinition().GetMaxUnitsCount(); if (mx4 > 0) { frMaxCap = mx4; } } } catch (e) {}
-                                try { if (frMaxCap <= 200) { var mx5 = spec.mSpecialistDefinition.GetMaxUnitsCount(); if (mx5 > 0) { frMaxCap = mx5; } } } catch (e) {}
-                            }
-
-                            // Greedily build fill army from our running pool snapshot
-                            var frArmy = {};
-                            var frTotal = 0;
-                            _qrUnitOrder.forEach(function (t) {
-                                if (frTotal >= frMaxCap) { return; }
-                                var avail = frPool[t] || 0;
-                                if (avail <= 0) { return; }
-                                var take = Math.min(avail, frMaxCap - frTotal);
-                                if (take > 0) {
-                                    frArmy[t] = take;
-                                    frTotal += take;
-                                    frPool[t] -= take; // deduct from shared pool
-                                }
-                            });
-
-                            var frUnitTypes = Object.keys(frArmy).filter(function (t) { return frArmy[t] > 0; });
-                            if (frUnitTypes.length === 0) {
-                                game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' — no free units left, skipping.', 'adventurer');
-                                frProcessNext();
-                                return;
-                            }
-
-                            game.chatMessage('FILL_AND_RETURN: filling ' + frGenName + ' with ' + frTotal + '/' + frMaxCap + ' units...', 'adventurer');
+                            game.chatMessage('FILL_AND_RETURN: unloading ' + frGenName + ' (cap ' + frMaxCap + ')...', 'adventurer');
 
                             // Step 1: Unload general
                             try {
@@ -2943,35 +2883,136 @@ function _qrRunBattleScript(startIdx) {
                                 game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, frUnload, armyResponder);
                             } catch (e) {
                                 game.chatMessage('FILL_AND_RETURN: unload error for ' + frGenName + ': ' + e, 'adventurer');
-                                frProcessNext();
+                                setTimeout(frProcessNext, 1000);
                                 return;
                             }
 
-                            // Step 2: After 10s, load new army
-                            setTimeout(function () {
-                                if (state.stopped) { return; }
-                                try {
-                                    var spec2 = _qrFindSpecByUID(uid);
-                                    if (!spec2) {
-                                        game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' not found after unload.', 'adventurer');
-                                        frProcessNext(); return;
+                            // Step 2: Poll until unload confirmed (HasUnits = false), timeout 30s
+                            var frUnloadTicks = 0;
+                            var ivFrUnload = setInterval(function () {
+                                if (state.stopped) { clearInterval(ivFrUnload); return; }
+                                frUnloadTicks++;
+                                var s2 = _qrFindSpecByUID(uid);
+                                var stillHas = false;
+                                try { stillHas = s2 && s2.HasUnits && s2.HasUnits(); } catch (e) {}
+                                if (!stillHas || frUnloadTicks > 15) { // 15 × 2s = 30s
+                                    clearInterval(ivFrUnload);
+                                    if (stillHas) {
+                                        game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' unload timeout — continuing anyway.', 'adventurer');
                                     }
-                                    var frLoad = new dRaiseArmyVODef();
-                                    frLoad.armyHolderSpecialistVO = spec2.CreateSpecialistVOFromSpecialist();
-                                    frUnitTypes.forEach(function (t) {
-                                        var dRes = new dResourceVODef();
-                                        dRes.name_string = t;
-                                        dRes.amount = frArmy[t];
-                                        frLoad.unitSquads.addItem(dRes);
-                                    });
-                                    game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, frLoad, armyResponder);
-                                    frFilledUIDs.push(uid);
-                                } catch (e) {
-                                    game.chatMessage('FILL_AND_RETURN: load error for ' + frGenName + ': ' + e, 'adventurer');
+                                    frDoLoad(uid, frGenName, frMaxCap);
                                 }
-                                // Step 3: Wait 10s then process next general
-                                setTimeout(function () { if (!state.stopped) { frProcessNext(); } }, 10000);
-                            }, 10000);
+                            }, 2000);
+                        }
+
+                        function frDoLoad(uid, frGenName, frMaxCap) {
+                            if (state.stopped) { return; }
+                            var spec = _qrFindSpecByUID(uid);
+                            if (!spec) {
+                                game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' not found for load.', 'adventurer');
+                                setTimeout(frProcessNext, 1000);
+                                return;
+                            }
+
+                            // Read LIVE free pool from zone army (units returned after unload are now here)
+                            var frArmy = {};
+                            var frTotal = 0;
+                            try {
+                                var livePool = {};
+                                game.zone.GetArmy(game.gi.mCurrentPlayer.GetPlayerId())
+                                    .GetSquadsCollection_vector()
+                                    .forEach(function (sq) {
+                                        var t = sq.GetType ? sq.GetType() : null;
+                                        var amt = sq.GetAmount ? sq.GetAmount() : 0;
+                                        if (t && t.toLowerCase().indexOf('expedition') < 0 && amt > 0) {
+                                            livePool[t] = (livePool[t] || 0) + amt;
+                                        }
+                                    });
+                                // Fill using _qrUnitOrder priority up to capacity
+                                _qrUnitOrder.forEach(function (t) {
+                                    if (frTotal >= frMaxCap) { return; }
+                                    var avail = livePool[t] || 0;
+                                    if (avail <= 0) { return; }
+                                    var take = Math.min(avail, frMaxCap - frTotal);
+                                    frArmy[t] = take;
+                                    frTotal += take;
+                                });
+                            } catch (e) {
+                                game.chatMessage('FILL_AND_RETURN: pool read error for ' + frGenName + ': ' + e, 'adventurer');
+                            }
+
+                            var frUnitTypes = Object.keys(frArmy).filter(function (t) { return frArmy[t] > 0; });
+                            if (frUnitTypes.length === 0) {
+                                game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' — pool empty, sending home empty.', 'adventurer');
+                                frSendHome(uid, frGenName);
+                                return;
+                            }
+
+                            game.chatMessage('FILL_AND_RETURN: loading ' + frGenName + ' with ' + frTotal + '/' + frMaxCap + ' units...', 'adventurer');
+
+                            try {
+                                var frLoad = new dRaiseArmyVODef();
+                                frLoad.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
+                                frUnitTypes.forEach(function (t) {
+                                    var dRes = new dResourceVODef();
+                                    dRes.name_string = t;
+                                    dRes.amount = frArmy[t];
+                                    frLoad.unitSquads.addItem(dRes);
+                                });
+                                game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, frLoad, armyResponder);
+                            } catch (e) {
+                                game.chatMessage('FILL_AND_RETURN: load error for ' + frGenName + ': ' + e, 'adventurer');
+                                frSendHome(uid, frGenName);
+                                return;
+                            }
+
+                            // Step 3: Poll until army confirmed on general, timeout 30s
+                            var frLoadTicks = 0;
+                            var ivFrLoad = setInterval(function () {
+                                if (state.stopped) { clearInterval(ivFrLoad); return; }
+                                frLoadTicks++;
+                                var liveLoaded = 0;
+                                try {
+                                    var s3 = _qrFindSpecByUID(uid);
+                                    s3.GetArmy().GetSquadsCollection_vector().forEach(function (sq) {
+                                        liveLoaded += sq.GetAmount ? sq.GetAmount() : 0;
+                                    });
+                                } catch (e) {}
+                                if (liveLoaded >= frTotal || frLoadTicks > 15) { // 15 × 2s = 30s
+                                    clearInterval(ivFrLoad);
+                                    // Before sending home: check if general is underfilled with free units still available
+                                    var freeLeft = 0;
+                                    try {
+                                        game.zone.GetArmy(game.gi.mCurrentPlayer.GetPlayerId())
+                                            .GetSquadsCollection_vector()
+                                            .forEach(function (sq) {
+                                                if (sq.GetType && sq.GetType().toLowerCase().indexOf('expedition') < 0) {
+                                                    freeLeft += sq.GetAmount ? sq.GetAmount() : 0;
+                                                }
+                                            });
+                                    } catch (e) {}
+                                    if (liveLoaded < frMaxCap && freeLeft > 0) {
+                                        game.chatMessage('FILL_AND_RETURN: WARNING — ' + frGenName + ' has ' + liveLoaded + '/' + frMaxCap + ' but ' + freeLeft + ' units still unassigned!', 'adventurer');
+                                    } else {
+                                        game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' confirmed ' + liveLoaded + '/' + frMaxCap + ' \u2713', 'adventurer');
+                                    }
+                                    frSendHome(uid, frGenName);
+                                }
+                            }, 2000);
+                        }
+
+                        function frSendHome(uid, frGenName) {
+                            if (state.stopped) { return; }
+                            try {
+                                var spec = _qrFindSpecByUID(uid);
+                                if (spec) {
+                                    armyServices.specialist.sendToZone(spec, game.gi.mCurrentPlayer.GetHomeZoneId());
+                                    game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' \u2192 sent home.', 'adventurer');
+                                }
+                            } catch (e) {
+                                game.chatMessage('FILL_AND_RETURN: send-home error for ' + frGenName + ': ' + e, 'adventurer');
+                            }
+                            setTimeout(frProcessNext, 1500);
                         }
 
                         frProcessNext();
@@ -3032,88 +3073,10 @@ function _qrRunBattleScript(startIdx) {
         }
     }
 
-    // Pre-flight: if any general is below minimum army, try to auto-load before starting
-    function pfCheckErrors() {
-        var errs = [];
-        (profile.steps || []).forEach(function (s) {
-            if (!s.generalUID || !s.stepMinArmy) { return; }
-            var minKeys = Object.keys(s.stepMinArmy).filter(function (t) { return s.stepMinArmy[t] > 0; });
-            if (minKeys.length === 0) { return; }
-            var label = s.generalName || s.generalUID;
-            var spec = _qrFindSpecByUID(s.generalUID);
-            if (!spec) { errs.push(label + ': general not found'); return; }
-            var cur = {};
-            try { spec.GetArmy().GetSquadsCollection_vector().forEach(function (sq) { var t = sq.GetType ? sq.GetType() : ''; var a = sq.GetAmount ? sq.GetAmount() : 0; if (t) { cur[t] = (cur[t] || 0) + a; } }); } catch (e) {}
-            minKeys.forEach(function (t) {
-                if ((cur[t] || 0) < s.stepMinArmy[t]) {
-                    errs.push(label + ': needs ' + s.stepMinArmy[t] + ' ' + t + ', has ' + (cur[t] || 0));
-                }
-            });
-        });
-        return errs;
-    }
-
-    function pfLaunch() {
-        game.chatMessage('BattleScript: starting from step ' + (startIdx + 1) + ' (' + state.steps.length + ' total)', 'adventurer');
-        runNextStep();
-    }
-
-    var pfInitErrors = pfCheckErrors();
-    if (pfInitErrors.length === 0) {
-        // All armies already met — start immediately
-        pfLaunch();
-    } else {
-        // Attempt to auto-load minimum army for each general that is below
-        game.chatMessage('BattleScript: pre-flight \u2014 loading armies for ' + pfInitErrors.length + ' shortfall(s)\u2026', 'adventurer');
-        var pfLoadQ = new TimedQueue(2000);
-        (profile.steps || []).forEach(function (s) {
-            if (!s.generalUID || !s.stepMinArmy) { return; }
-            var minKeys = Object.keys(s.stepMinArmy).filter(function (t) { return s.stepMinArmy[t] > 0; });
-            if (minKeys.length === 0) { return; }
-            var spec = _qrFindSpecByUID(s.generalUID);
-            if (!spec) { return; }
-            var cur = {};
-            try { spec.GetArmy().GetSquadsCollection_vector().forEach(function (sq) { var t = sq.GetType ? sq.GetType() : ''; var a = sq.GetAmount ? sq.GetAmount() : 0; if (t) { cur[t] = (cur[t] || 0) + a; } }); } catch (e) {}
-            var needsLoad = minKeys.some(function (t) { return (cur[t] || 0) < s.stepMinArmy[t]; });
-            if (!needsLoad) { return; }
-            pfLoadQ.add(function () {
-                try {
-                    var spec2 = _qrFindSpecByUID(s.generalUID);
-                    if (!spec2) { return; }
-                    var vo = new dRaiseArmyVODef();
-                    vo.armyHolderSpecialistVO = spec2.CreateSpecialistVOFromSpecialist();
-                    minKeys.forEach(function (t) {
-                        var res = new dResourceVODef();
-                        res.name_string = t;
-                        res.amount = s.stepMinArmy[t];
-                        vo.unitSquads.addItem(res);
-                    });
-                    game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, vo, armyResponder);
-                    game.chatMessage('BattleScript: pre-flight loading army for ' + (s.generalName || s.generalUID) + '\u2026', 'adventurer');
-                } catch (e) { game.chatMessage('BattleScript: pre-flight load error: ' + e, 'adventurer'); }
-            });
-        });
-        // Poll up to ~14s for armies to be confirmed, then launch or fail
-        pfLoadQ.add(function () {
-            var pfWait = 0;
-            var ivPf = setInterval(function () {
-                if (state.stopped) { clearInterval(ivPf); return; }
-                pfWait++;
-                var finalErrors = pfCheckErrors();
-                if (finalErrors.length === 0 || pfWait > 7) { // 7 \u00d7 2s = ~14s
-                    clearInterval(ivPf);
-                    if (finalErrors.length > 0) {
-                        showGameAlert('Cannot start \u2014 army requirements not met after auto-load:\n\n' + finalErrors.join('\n'));
-                        finish(null);
-                        return;
-                    }
-                    game.chatMessage('BattleScript: armies confirmed \u2014 starting.', 'adventurer');
-                    pfLaunch();
-                }
-            }, 2000);
-        });
-        pfLoadQ.run();
-    }
+    // Army checking is handled by _qrRun before the battle script is ever called.
+    // No pre-flight here — start immediately.
+    game.chatMessage('BattleScript: starting from step ' + (startIdx + 1) + ' (' + state.steps.length + ' total)', 'adventurer');
+    runNextStep();
 }
 
 })();
