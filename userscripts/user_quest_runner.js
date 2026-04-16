@@ -13,6 +13,7 @@ var _qrLang = {
         'profileName':       'Profile Name',
         'addStep':           '+ Add Step',
         'save':              'Save Profile',
+        'saveAs':            'Save As',
         'run':               'Run',
         'colGeneral':        'General',
         'colAdventure':      'Adventure',
@@ -54,6 +55,7 @@ var _qrLang = {
         'profileName':       'Nome do Perfil',
         'addStep':           '+ Adicionar Passo',
         'save':              'Salvar Perfil',
+        'saveAs':            'Salvar Como',
         'run':               'Executar',
         'colGeneral':        'General',
         'colAdventure':      'Aventura',
@@ -411,6 +413,7 @@ function _qrOpenModal() {
     if (_qrModal.withFooter('.qrSaveBtn').length === 0) {
         _qrModal.Footer().prepend([
             $('<button>').attr({ 'class': 'btn btn-primary qrSaveBtn' }).text(_qrT('save')).click(_qrSaveAndPersist),
+            $('<button>').attr({ 'class': 'btn btn-info', 'style': 'margin-left:4px;' }).text(_qrT('saveAs')).click(_qrSaveAs),
             $('<button>').attr({ 'class': 'btn btn-success pull-right qrRunBtn' }).text(_qrT('run')).click(_qrRun),
             $('<button>').attr({ 'class': 'btn btn-default', 'id': 'qrMinimizeBtn', 'title': 'Minimize window', 'style': 'margin-right:6px;' })
                 .text('[−]')
@@ -1179,6 +1182,23 @@ function _qrSaveAndPersist() {
     showGameAlert(_qrT('profileSaved'));
 }
 
+// ---- Save As: duplicate current profile with a new name ----
+function _qrSaveAs() {
+    if (_qrSelectedIdx < 0 || _qrSelectedIdx >= _qrProfiles.length) {
+        showGameAlert('No profile selected.'); return;
+    }
+    _qrSaveCurrentFromUI();
+    var src = _qrProfiles[_qrSelectedIdx];
+    var copy = JSON.parse(JSON.stringify(src));
+    copy.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    copy.name = src.name + ' (copy)';
+    _qrProfiles.push(copy);
+    _qrSelectedIdx = _qrProfiles.length - 1;
+    _qrSave();
+    _qrRenderAll();
+    showGameAlert('Profile duplicated as "' + copy.name + '".');
+}
+
 // ---- Validation ----
 function _qrValidate(profile) {
     var errors = [];
@@ -1869,7 +1889,8 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         ['DELAY',            'DELAY'],
         ['COLLECTIBLES',     'COLLECT COLLECTIBLES'],
         ['FILL_AND_RETURN',  'FILL GENERALS \u2192 STAR'],
-        ['CLAIM_QUESTS',     'CLAIM QUEST REWARDS']
+        ['CLAIM_QUESTS',     'COMPLETE QUEST'],
+        ['RETURN_HOME',      'RETURN TO ISLAND']
     ];
     ALL_TYPES.forEach(function (pair) {
         $('<option>').val(pair[0]).text(pair[1]).prop('selected', bsStep.type === pair[0]).appendTo($typeSel);
@@ -2248,6 +2269,13 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         .click(function () {
             _qrSaveCurrentFromUI();
             profile.battleScript.splice(idx, 1);
+            _qrRenderEditor();
+        }).appendTo($row);
+    $('<button>').attr('class', 'btn btn-xs btn-default').attr('title', 'Add step below').text('+ Add step below')
+        .css({ 'margin-left': '4px' })
+        .click(function () {
+            _qrSaveCurrentFromUI();
+            profile.battleScript.splice(idx + 1, 0, _qrBsNewStep('MOVE'));
             _qrRenderEditor();
         }).appendTo($row);
 
@@ -3067,6 +3095,17 @@ function _qrRunBattleScript(startIdx) {
 
                 case 'CLAIM_QUESTS': {
                     game.chatMessage('CLAIM_QUESTS: scanning for finished quests...', 'adventurer');
+                    // Use auto-claim from questlist if available
+                    if (typeof qlAutoClaimAll === 'function') {
+                        _qrMinimizeModal();
+                        qlAutoClaimAll(function(claimed) {
+                            _qrRestoreModal();
+                            game.chatMessage('CLAIM_QUESTS: auto-claimed ' + claimed + ' quest(s).', 'adventurer');
+                            if (!state.stopped) { runNextStep(); }
+                        });
+                        break;
+                    }
+                    // Fallback: manual claim
                     try {
                         var cqMgr  = game.gi.mNewQuestManager;
                         var cqPool = cqMgr.GetQuestPool();
@@ -3107,6 +3146,30 @@ function _qrRunBattleScript(startIdx) {
                         game.chatMessage('CLAIM_QUESTS error: ' + e, 'adventurer');
                         setTimeout(runNextStep, 1000);
                     }
+                    break;
+                }
+
+                case 'RETURN_HOME': {
+                    var rhHomeId = game.gi.mCurrentPlayer.GetHomeZoneId();
+                    if (game.gi.mCurrentViewedZoneID === rhHomeId) {
+                        game.chatMessage('RETURN_HOME: already on home island.', 'adventurer');
+                        setTimeout(runNextStep, 500);
+                        break;
+                    }
+                    game.chatMessage('RETURN_HOME: navigating back to home island\u2026', 'adventurer');
+                    try { game.gi.visitZone(rhHomeId); } catch (e) {
+                        game.chatMessage('RETURN_HOME: visitZone error: ' + e, 'adventurer');
+                        setTimeout(runNextStep, 1000);
+                        break;
+                    }
+                    var rhPoll = setInterval(function () {
+                        if (state.stopped) { clearInterval(rhPoll); return; }
+                        if (game.gi.mCurrentViewedZoneID === rhHomeId) {
+                            clearInterval(rhPoll);
+                            game.chatMessage('RETURN_HOME: arrived on home island.', 'adventurer');
+                            setTimeout(runNextStep, 2000);
+                        }
+                    }, 2000);
                     break;
                 }
 

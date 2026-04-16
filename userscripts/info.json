@@ -144,5 +144,12 @@
       "longDesc": "Define profiles with multiple generals, their army compositions, and destination adventures. Run a profile to automatically load troops and dispatch all generals to their adventures with a single click.",
       "author": "custom",
       "url": ""
+  },
+  "user_questlist.js": {
+      "name": "Quest List",
+      "shortDesc": "Show current active quests.",
+      "longDesc": "Lists all quests from the quest pool with their name, status (Active/Finished/Inactive) and trigger buildings.",
+      "author": "custom",
+      "url": ""
   }
 }
