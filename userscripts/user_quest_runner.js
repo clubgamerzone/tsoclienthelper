@@ -106,6 +106,8 @@ var _qrRunning       = false;
 var _qrBsState       = null;  // { steps, stepIdx, profile } while battle script is running or paused
 var _qrGeneralsCollapsed   = false;  // collapsed state for Generals section
 var _qrBattleFlowCollapsed = false;  // collapsed state for Battle Flow section
+var _qrScrollToBsIdx       = -1;    // battle-script step index to scroll to after render (-1 = no scroll)
+var _qrScrollToGenIdx      = -1;    // generals step index to scroll to after render (-1 = no scroll)
 
 // ---- Modal minimize/restore ----
 function _qrMinimizeModal() {
@@ -804,6 +806,7 @@ function _qrRenderEditor() {
         .click(function () {
             _qrSaveCurrentFromUI();
             profile.steps.push(_qrNewStep());
+            _qrScrollToGenIdx = profile.steps.length - 1;
             _qrRenderEditor();
         })
         .appendTo($genBody);
@@ -822,6 +825,26 @@ function _qrRenderEditor() {
     $ed.on('qrRefreshNeeded', _qrRefreshDiff);
     // Initial diff calculation after everything is rendered
     setTimeout(_qrRefreshDiff, 0);
+
+    // Auto-scroll to the targeted step after render
+    setTimeout(function () {
+        var $scrollParent = $('#questRunnerModalData').closest('.modal-body');
+        if (!$scrollParent.length) { $scrollParent = $('#questRunnerModalData'); }
+        if (_qrScrollToBsIdx >= 0) {
+            var $target = $('#qrBsSteps .qrBsStep[data-idx="' + _qrScrollToBsIdx + '"]');
+            if ($target.length && $scrollParent.length) {
+                $scrollParent.animate({ scrollTop: $scrollParent.scrollTop() + $target.position().top - $scrollParent.height() / 3 }, 200);
+            }
+            _qrScrollToBsIdx = -1;
+        }
+        if (_qrScrollToGenIdx >= 0) {
+            var $genTarget = $('#qrSteps .qrStep[data-idx="' + _qrScrollToGenIdx + '"]');
+            if ($genTarget.length && $scrollParent.length) {
+                $scrollParent.animate({ scrollTop: $scrollParent.scrollTop() + $genTarget.position().top - $scrollParent.height() / 3 }, 200);
+            }
+            _qrScrollToGenIdx = -1;
+        }
+    }, 50);
 }
 
 // ---- Build one step row ----
@@ -978,6 +1001,7 @@ function _qrMakeStepRow(step, idx) {
         .click((function (i) { return function () {
             _qrSaveCurrentFromUI();
             _qrProfiles[_qrSelectedIdx].steps.splice(i, 1);
+            _qrScrollToGenIdx = Math.min(i, _qrProfiles[_qrSelectedIdx].steps.length - 1);
             _qrRenderEditor();
         }; })(idx));
 
@@ -1784,7 +1808,9 @@ function _qrRenderBattleScript($ed, profile) {
         .text('Snapshot Positions')
         .click(function () {
             _qrSaveCurrentFromUI();
+            var prevLen = profile.battleScript.length;
             _qrBsSnapshot(profile);
+            _qrScrollToBsIdx = prevLen;
             _qrRenderEditor();
         }).appendTo($hdr);
     $('<button>').attr({ 'class': 'btn btn-xs btn-success', 'id': 'qrBsRunBtn' })
@@ -1825,10 +1851,8 @@ function _qrRenderBattleScript($ed, profile) {
         .click(function () {
             _qrSaveCurrentFromUI();
             profile.battleScript.push(_qrBsNewStep('MOVE'));
+            _qrScrollToBsIdx = profile.battleScript.length - 1;
             _qrRenderEditor();
-            // Scroll to the new step
-            var $steps = $('#qrBsSteps');
-            if ($steps.length) { $steps[0].scrollTop = $steps[0].scrollHeight; }
         }).appendTo($addRow);
     $wrap.append($addRow);
     $outer.append($wrap);
@@ -1900,6 +1924,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         $row.attr('data-type', newType);        // keep data-type in sync for any mid-change save
         _qrSaveCurrentFromUI();
         profile.battleScript[idx].type = newType;
+        _qrScrollToBsIdx = idx;
         _qrRenderEditor();
     });
     $row.append($typeSel);
@@ -2233,6 +2258,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
                 _qrSaveCurrentFromUI();
                 var a = profile.battleScript;
                 a.unshift(a.splice(idx, 1)[0]);
+                _qrScrollToBsIdx = 0;
                 _qrRenderEditor();
             }).appendTo($row);
         $('<button>').attr('class', 'btn btn-xs btn-default').text('\u2191')
@@ -2240,6 +2266,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
                 _qrSaveCurrentFromUI();
                 var a = profile.battleScript;
                 var t = a[idx - 1]; a[idx - 1] = a[idx]; a[idx] = t;
+                _qrScrollToBsIdx = idx - 1;
                 _qrRenderEditor();
             }).appendTo($row);
     }
@@ -2249,6 +2276,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
                 _qrSaveCurrentFromUI();
                 var a = profile.battleScript;
                 var t = a[idx + 1]; a[idx + 1] = a[idx]; a[idx] = t;
+                _qrScrollToBsIdx = idx + 1;
                 _qrRenderEditor();
             }).appendTo($row);
         $('<button>').attr('class', 'btn btn-xs btn-default').attr('title', 'Move to bottom').text('\u21d3')
@@ -2256,6 +2284,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
                 _qrSaveCurrentFromUI();
                 var a = profile.battleScript;
                 a.push(a.splice(idx, 1)[0]);
+                _qrScrollToBsIdx = profile.battleScript.length - 1;
                 _qrRenderEditor();
             }).appendTo($row);
     }
@@ -2269,6 +2298,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         .click(function () {
             _qrSaveCurrentFromUI();
             profile.battleScript.splice(idx, 1);
+            _qrScrollToBsIdx = Math.min(idx, profile.battleScript.length - 1);
             _qrRenderEditor();
         }).appendTo($row);
     $('<button>').attr('class', 'btn btn-xs btn-default').attr('title', 'Add step below').text('+ Add step below')
@@ -2276,6 +2306,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         .click(function () {
             _qrSaveCurrentFromUI();
             profile.battleScript.splice(idx + 1, 0, _qrBsNewStep('MOVE'));
+            _qrScrollToBsIdx = idx + 1;
             _qrRenderEditor();
         }).appendTo($row);
 
