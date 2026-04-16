@@ -131,6 +131,13 @@
       "author": "SirriS",
       "url": ""
   },
+  "user_quest_runner_utils.js": {
+      "name": "Quest Runner Utils",
+      "shortDesc": "Shared army utilities for Quest Runner.",
+      "longDesc": "Provides reusable army helper functions (e.g. unloadAll) used internally by Quest Runner and available to other scripts via window._qrUtils.",
+      "author": "custom",
+      "url": ""
+  },
   "user_quest_runner.js": {
       "name": "Quest Runner",
       "shortDesc": "Automate quest general dispatch.",

@@ -1444,18 +1444,10 @@ function _qrRun() {
 
         // Step 1: unload this general (so the pool is free and the load is clean)
         game.chatMessage('Adventurer [' + nm + ']: unloading before load\u2026', 'adventurer');
-        try {
-            var voUnload = new dRaiseArmyVODef();
-            voUnload.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
-            // empty unitSquads = unload all
-            game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, voUnload, armyResponder);
-        } catch (e) {
-            game.chatMessage('Adventurer [' + nm + ']: unload error: ' + e, 'adventurer');
-            // continue anyway
-        }
+        var hasAnything = false;
+        try { hasAnything = spec.HasUnits && spec.HasUnits(); } catch (e) {}
 
-        // Step 2: after 3s, send the load
-        setTimeout(function () {
+        function doFireLoad() {
             var spec2 = _qrFindSpecByUID(step.generalUID);
             if (!spec2) { abortRun('General ' + nm + ' not found after unload.'); return; }
             game.chatMessage('Adventurer [' + nm + ']: loading army\u2026', 'adventurer');
@@ -1500,10 +1492,63 @@ function _qrRun() {
                     game.chatMessage('Adventurer [' + nm + ']: waiting for army (' + missing2.join(', ') + ')\u2026 (' + (pollTick * 2) + 's)', 'adventurer');
                 }
             }, 2000);
-        }, 3000);
+        }
+
+        if (!hasAnything) {
+            // General is already empty — skip unload, fire load immediately
+            game.chatMessage('Adventurer [' + nm + ']: already empty, loading directly\u2026', 'adventurer');
+            doFireLoad();
+        } else {
+            // Step 2: send unload, then poll until confirmed empty (up to 30s) before loading
+            try {
+                var voUnload = new dRaiseArmyVODef();
+                voUnload.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
+                // empty unitSquads = unload all
+                game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, voUnload, armyResponder);
+            } catch (e) {
+                game.chatMessage('Adventurer [' + nm + ']: unload error: ' + e + ' — loading anyway', 'adventurer');
+                doFireLoad();
+                return;
+            }
+            var unloadTicks = 0;
+            var ivUnload = setInterval(function () {
+                unloadTicks++;
+                var su = _qrFindSpecByUID(step.generalUID);
+                var stillHas = false;
+                try { stillHas = su && su.HasUnits && su.HasUnits(); } catch (e) {}
+                if (!stillHas || unloadTicks > 15) { // 15 × 2s = 30s
+                    clearInterval(ivUnload);
+                    if (stillHas) {
+                        game.chatMessage('Adventurer [' + nm + ']: unload timeout — loading anyway\u2026', 'adventurer');
+                    } else {
+                        game.chatMessage('Adventurer [' + nm + ']: unload confirmed \u2713', 'adventurer');
+                    }
+                    doFireLoad();
+                }
+            }, 2000);
+        }
     }
 
-    doLoadNextGeneral();
+    // Unload ALL generals referenced in the profile first, so the unit pool is fully free
+    // before we start assigning specific armies to each general one by one.
+    var allProfileSpecs = [];
+    var _seenUnloadUIDs = {};
+    profile.steps.forEach(function (s) {
+        if (!s.generalUID || _seenUnloadUIDs[s.generalUID]) { return; }
+        _seenUnloadUIDs[s.generalUID] = true;
+        var sp = _qrFindSpecByUID(s.generalUID);
+        if (sp) { allProfileSpecs.push(sp); }
+    });
+
+    if (allProfileSpecs.length > 0) {
+        game.chatMessage('Adventurer: unloading all ' + allProfileSpecs.length + ' general(s) to free unit pool\u2026', 'adventurer');
+        _qrUtils.unloadAll(allProfileSpecs, function () {
+            game.chatMessage('Adventurer: all generals unloaded \u2713', 'adventurer');
+            doLoadNextGeneral();
+        });
+    } else {
+        doLoadNextGeneral();
+    }
 }
 
 // ============================================================
