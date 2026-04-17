@@ -3441,9 +3441,7 @@ function _qrRunBattleScript(startIdx) {
                     game.chatMessage('CLAIM_QUESTS: scanning for finished quests...', 'adventurer');
                     // Use auto-claim from questlist if available
                     if (typeof qlAutoClaimAll === 'function') {
-                        _qrMinimizeModal();
                         qlAutoClaimAll(function(claimed) {
-                            _qrRestoreModal();
                             game.chatMessage('CLAIM_QUESTS: auto-claimed ' + claimed + ' quest(s).', 'adventurer');
                             if (!state.stopped) { runNextStep(); }
                         });
@@ -3467,9 +3465,7 @@ function _qrRunBattleScript(startIdx) {
                         var cqWaitSecs = parseInt(step.claimWaitSecs, 10) || 5;
                         var cqClaimQueue = new TimedQueue(1200);
 
-                        // Minimize window so the Quest Book is accessible, open each dialog, wait, then restore
-                        _qrMinimizeModal();
-                        game.chatMessage('CLAIM_QUESTS: window minimized — confirm quest(s) in the Quest Book, auto-continuing in ' + (cqWaitSecs * cqFinished.length) + 's...', 'adventurer');
+                        game.chatMessage('CLAIM_QUESTS: claiming ' + cqFinished.length + ' quest(s), auto-continuing in ' + (cqWaitSecs * cqFinished.length) + 's...', 'adventurer');
                         cqFinished.forEach(function (q) {
                             cqClaimQueue.add(function () {
                                 if (state.stopped) { return; }
@@ -3482,7 +3478,6 @@ function _qrRunBattleScript(startIdx) {
                             }, cqWaitSecs * 1000);
                         });
                         cqClaimQueue.add(function () {
-                            _qrRestoreModal();
                             if (!state.stopped) { runNextStep(); }
                         });
                         cqClaimQueue.run();
@@ -3567,9 +3562,7 @@ function _qrRunBattleScript(startIdx) {
 
                     function caqClaimAll(done) {
                         if (typeof qlAutoClaimAll === 'function') {
-                            _qrMinimizeModal();
                             qlAutoClaimAll(function (claimed) {
-                                _qrRestoreModal();
                                 game.chatMessage('COLLECT_ALL: auto-claimed ' + claimed + ' quest(s).', 'adventurer');
                                 done();
                             });
@@ -3707,9 +3700,7 @@ function _qrRunBattleScript(startIdx) {
 
                     function rhClaimAll(done) {
                         if (typeof qlAutoClaimAll === 'function') {
-                            _qrMinimizeModal();
                             qlAutoClaimAll(function (claimed) {
-                                _qrRestoreModal();
                                 game.chatMessage('RETURN_HOME: auto-claimed ' + claimed + ' quest(s).', 'adventurer');
                                 done();
                             });
