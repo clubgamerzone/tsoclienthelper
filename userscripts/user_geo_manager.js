@@ -1,4 +1,4 @@
-// ========== GEOLOGIST MANAGER ==========
+﻿// ========== GEOLOGIST MANAGER ==========
 // Shows ALL geologists (idle + busy), active mine depletion times,
 // depleted deposit count (accurate), and smart-send geologists to mines.
 // Tools menu > "Geo Manager"
@@ -50,7 +50,7 @@ function _gmStartAutoBuildWatcher() {
     if (_gmAutoBuildInterval) clearInterval(_gmAutoBuildInterval);
     _gmAutoBuildInterval = setInterval(function () {
         try {
-            if ($('#gmModal:visible').length === 0) return;
+            if (!_gmRunAlways && $('#gmModal:visible').length === 0) return;
             if (!game || !game.gi || !game.gi.isOnHomzone || !game.gi.isOnHomzone()) return;
             var data = _gmCollectData();
             var found = data.foundMines || [];
@@ -60,21 +60,16 @@ function _gmStartAutoBuildWatcher() {
             found.forEach(function (m) { current[m.Grid] = m; });
 
             if (_gmAutoBuildSeenGrids === null) {
-                // First tick: snapshot existing deposits â€” don't build them
-                _gmAutoBuildSeenGrids = current;
-                return;
+                _gmAutoBuildSeenGrids = {};  // initialize so all affordable deposits are built
             }
 
-            // Detect NEW deposits (in current but not in seen)
-            var tooBuild = [];
-            Object.keys(current).forEach(function (grid) {
-                if (!_gmAutoBuildSeenGrids[grid]) tooBuild.push(current[grid]);
-            });
+            // Build all found deposits that are affordable (new or pre-existing)
+            var tooBuild = Object.keys(current).map(function (g) { return current[g]; });
 
             // Update seen to current state
             _gmAutoBuildSeenGrids = current;
 
-            // Build each new deposit that is affordable
+            // Build each deposit that is affordable
             var buildIdx = 0;
             tooBuild.forEach(function (m) {
                 var btype = _gmBuildType[m.OreName];
@@ -229,6 +224,10 @@ function _gmSetBldLimit(grid, limited) {
     }
     try { storeSettings(_gmBldLimit, 'gmBldLimit'); } catch (e) {}
 }
+
+// Run-always toggle: if true, auto-send/build work even when the modal is closed
+var _gmRunAlways = false;
+try { _gmRunAlways = readSettings(null, 'gmRunAlways') === true; } catch (e) {}
 
 // Auto-send toggle and per-cycle geo limit
 var _gmAutoSendEnabled = true;
@@ -1216,6 +1215,9 @@ function _gmMenuHandler() {
                 '&nbsp;&nbsp;' +
                 $('<button>').attr({ id: 'gmAutoSendToggle', 'class': 'btn btn-xs ' + (_gmAutoSendEnabled ? 'btn-success' : 'btn-danger') })
                              .text(_gmAutoSendEnabled ? 'Auto-Send: ON' : 'Auto-Send: OFF').prop('outerHTML') +
+                '&nbsp;&nbsp;' +
+                $('<button>').attr({ id: 'gmRunAlwaysToggle', 'class': 'btn btn-xs ' + (_gmRunAlways ? 'btn-success' : 'btn-default') })
+                             .text(_gmRunAlways ? 'Run Always: ON' : 'Run Always: OFF').prop('outerHTML') +
                 '&nbsp;Max/cycle:&nbsp;<input id="gmAutoSendMax" type="number" min="0" style="width:45px;text-align:center;display:inline-block" value="' + _gmAutoSendMax + '">&nbsp;<small style="color:#999">(0=&#8734;)</small>' +
                 '&nbsp;&nbsp;<small style="color:#aaa">Preferred type per geo is saved automatically.</small>' +
                 '</div>'
@@ -1228,6 +1230,13 @@ function _gmMenuHandler() {
                 $(this).toggleClass('btn-success', _gmAutoSendEnabled)
                        .toggleClass('btn-danger', !_gmAutoSendEnabled)
                        .text(_gmAutoSendEnabled ? 'Auto-Send: ON' : 'Auto-Send: OFF');
+            });
+            $('#gmRunAlwaysToggle').click(function () {
+                _gmRunAlways = !_gmRunAlways;
+                try { storeSettings(_gmRunAlways, 'gmRunAlways'); } catch (e) {}
+                $(this).toggleClass('btn-success', _gmRunAlways)
+                       .toggleClass('btn-default', !_gmRunAlways)
+                       .text(_gmRunAlways ? 'Run Always: ON' : 'Run Always: OFF');
             });
             $('#gmAutoSendMax').off('change').on('change', function () {
                 _gmAutoSendMax = parseInt($(this).val(), 10) || 0;

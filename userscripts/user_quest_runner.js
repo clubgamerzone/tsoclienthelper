@@ -133,10 +133,10 @@ function _qrRestoreModal() {
 }
 
 // ---- Persistence ----
-// Each profile is stored as its own JSON file inside a 'quest_runner_profiles/'
-// directory in the app's writable storage area.  Files are named <id>.json.
+// Each profile is stored as its own JSON file inside Documents/quest_runner_profiles/.
+// Using Documents keeps profiles safe across AIR app updates and crashes.
 function _qrProfileDir() {
-    var dir = air.File.applicationStorageDirectory.resolvePath('quest_runner_profiles');
+    var dir = air.File.documentsDirectory.resolvePath('quest_runner_profiles');
     if (!dir.exists) { dir.createDirectory(); }
     return dir;
 }
@@ -150,6 +150,7 @@ function _qrProfileFileFor(profile) {
 // Does NOT load full profile data — use _qrLoadProfile(id) for that.
 function _qrScanFiles() {
     _qrFileList = [];
+
     // ── Merge profiles from old monolithic files that are missing individual files ──
     var dir = _qrProfileDir();
     var hasMigrated = false;
@@ -284,11 +285,12 @@ function _qrSave() {
 }
 
 function _qrSaveOne(profile) {
+    var json = JSON.stringify(profile, null, '  ');
     try {
         var pf = _qrProfileFileFor(profile);
         var fs = new air.FileStream();
         fs.open(pf, air.FileMode.WRITE);
-        fs.writeUTFBytes(JSON.stringify(profile, null, '  '));
+        fs.writeUTFBytes(json);
         fs.close();
         game.chatMessage('Quest Runner: saved "' + profile.name + '" → ' + pf.nativePath, 'adventurer');
     } catch (e) {
