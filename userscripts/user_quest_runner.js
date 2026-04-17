@@ -99,8 +99,8 @@ function _qrT(key) {
 
 // ---- State ----
 var _qrSettingsKey   = 'usQuestRunner';
-var _qrProfiles      = [];   // Array of profile objects
-var _qrSelectedIdx   = -1;   // Index of currently selected profile in sidebar
+var _qrProfile       = null;   // Currently loaded profile object (or null)
+var _qrFileList      = [];     // [{id, name}] — lightweight list for sidebar (scanned from disk)
 var _qrModal         = null;
 var _qrRunning       = false;
 var _qrBsState       = null;  // { steps, stepIdx, profile } while battle script is running or paused
@@ -108,6 +108,7 @@ var _qrGeneralsCollapsed   = false;  // collapsed state for Generals section
 var _qrBattleFlowCollapsed = false;  // collapsed state for Battle Flow section
 var _qrScrollToBsIdx       = -1;    // battle-script step index to scroll to after render (-1 = no scroll)
 var _qrScrollToGenIdx      = -1;    // generals step index to scroll to after render (-1 = no scroll)
+var _qrBsStopFlag          = false; // global stop flag — backup for state.stopped
 
 // ---- Modal minimize/restore ----
 function _qrMinimizeModal() {
@@ -132,55 +133,143 @@ function _qrRestoreModal() {
 }
 
 // ---- Persistence ----
-// Profiles are stored in a dedicated file next to settings.json so they don't
-// bloat the shared settings blob and can be exported/imported freely.
-function _qrProfileFile() {
-    return new air.File('file:///' + air.File.applicationDirectory.resolvePath('quest_runner_profiles.json').nativePath);
+// Each profile is stored as its own JSON file inside a 'quest_runner_profiles/'
+// directory in the app's writable storage area.  Files are named <id>.json.
+function _qrProfileDir() {
+    var dir = air.File.applicationStorageDirectory.resolvePath('quest_runner_profiles');
+    if (!dir.exists) { dir.createDirectory(); }
+    return dir;
 }
 
-function _qrLoad() {
+function _qrProfileFileFor(profile) {
+    var id = profile.id || 'unknown';
+    return _qrProfileDir().resolvePath(id + '.json');
+}
+
+// Scan the profile directory and build a lightweight {id, name} list for the sidebar.
+// Does NOT load full profile data — use _qrLoadProfile(id) for that.
+function _qrScanFiles() {
+    _qrFileList = [];
+    // ── Migrate from old formats on first run ──
+    var dir = _qrProfileDir();
+    var hasMigrated = false;
     try {
-        var pf = _qrProfileFile();
-        if (pf.exists) {
-            var fs = new air.FileStream();
-            fs.open(pf, air.FileMode.READ);
-            var raw = fs.readUTFBytes(fs.bytesAvailable);
-            fs.close();
-            var parsed = JSON.parse(raw);
-            _qrProfiles = Array.isArray(parsed) ? parsed : [];
-            return;
+        var listing = dir.getDirectoryListing();
+        var hasFiles = false;
+        for (var k = 0; k < listing.length; k++) {
+            if (!listing[k].isDirectory && listing[k].name.match(/\.json$/i)) { hasFiles = true; break; }
+        }
+        if (!hasFiles) {
+            var migrated = [];
+            try {
+                var oldFile = air.File.applicationStorageDirectory.resolvePath('quest_runner_profiles.json');
+                if (oldFile.exists) {
+                    var ofs = new air.FileStream();
+                    ofs.open(oldFile, air.FileMode.READ);
+                    var oraw = ofs.readUTFBytes(ofs.bytesAvailable);
+                    ofs.close();
+                    var oarr = JSON.parse(oraw);
+                    if (Array.isArray(oarr)) { migrated = oarr; }
+                }
+            } catch (e) {}
+            if (migrated.length === 0) {
+                try {
+                    var d = readSettings(null, _qrSettingsKey);
+                    if (d && Array.isArray(d.profiles)) { migrated = d.profiles; }
+                } catch (e) {}
+            }
+            if (migrated.length > 0) {
+                migrated.forEach(function (p) {
+                    if (!p.id) { p.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+                    _qrSaveOne(p);
+                });
+                hasMigrated = true;
+                game.chatMessage('Quest Runner: migrated ' + migrated.length + ' profile(s) to individual files.', 'adventurer');
+            }
         }
     } catch (e) {}
-    // Legacy migration: read from settings.json and move to separate file on next save
-    var d = readSettings(null, _qrSettingsKey);
-    _qrProfiles = (d && Array.isArray(d.profiles)) ? d.profiles : [];
+
+    // ── Scan directory for {id, name} entries ──
+    try {
+        var files = _qrProfileDir().getDirectoryListing();
+        for (var i = 0; i < files.length; i++) {
+            var f = files[i];
+            if (f.isDirectory || !f.name.match(/\.json$/i)) { continue; }
+            try {
+                var fs = new air.FileStream();
+                fs.open(f, air.FileMode.READ);
+                var raw = fs.readUTFBytes(fs.bytesAvailable);
+                fs.close();
+                var p = JSON.parse(raw);
+                if (p && typeof p === 'object' && p.name) {
+                    var id = p.id || f.name.replace(/\.json$/i, '');
+                    _qrFileList.push({ id: id, name: p.name });
+                }
+            } catch (e) {}
+        }
+    } catch (e) {}
+    _qrFileList.sort(function (a, b) { return (a.name || '').localeCompare(b.name || ''); });
 }
 
-function _qrSave() {
+// Load a single profile by id into _qrProfile.
+function _qrLoadProfile(id) {
+    _qrSaveCurrentFromUI();  // save any unsaved edits from the previous profile
+    if (_qrProfile) { _qrSaveOne(_qrProfile); }
+    _qrProfile = null;
     try {
-        var pf = _qrProfileFile();
+        var pf = _qrProfileDir().resolvePath(id + '.json');
+        if (!pf.exists) { showGameAlert('Profile file not found: ' + id); return; }
+        var fs = new air.FileStream();
+        fs.open(pf, air.FileMode.READ);
+        var raw = fs.readUTFBytes(fs.bytesAvailable);
+        fs.close();
+        var p = JSON.parse(raw);
+        if (p && typeof p === 'object') {
+            if (!p.id) { p.id = id; }
+            _qrProfile = p;
+        }
+    } catch (e) { showGameAlert('Failed to load profile: ' + e); }
+}
+
+// Unload the current profile (close).
+function _qrCloseProfile() {
+    _qrSaveCurrentFromUI();
+    if (_qrProfile) { _qrSaveOne(_qrProfile); }
+    _qrProfile = null;
+    _qrRenderAll();
+}
+
+// Save the currently loaded profile back to its file.
+function _qrSave() {
+    if (_qrProfile) { _qrSaveOne(_qrProfile); }
+}
+
+function _qrSaveOne(profile) {
+    try {
+        var pf = _qrProfileFileFor(profile);
         var fs = new air.FileStream();
         fs.open(pf, air.FileMode.WRITE);
-        fs.writeUTFBytes(JSON.stringify(_qrProfiles, null, '  '));
+        fs.writeUTFBytes(JSON.stringify(profile, null, '  '));
         fs.close();
-        // Clear legacy entry from settings.json once successfully migrated
-        var legacy = readSettings(null, _qrSettingsKey);
-        if (legacy && legacy.profiles) {
-            storeSettings({}, _qrSettingsKey);
-        }
     } catch (e) {
-        // Fallback: write to settings.json if file I/O fails
-        storeSettings({ profiles: _qrProfiles }, _qrSettingsKey);
+        game.chatMessage('Quest Runner: save error for "' + profile.name + '": ' + e, 'adventurer');
     }
+}
+
+function _qrDeleteFile(profile) {
+    try {
+        var pf = _qrProfileFileFor(profile);
+        if (pf.exists) { pf.deleteFile(); }
+    } catch (e) {}
 }
 
 function _qrExportProfiles() {
     try {
         _qrSaveCurrentFromUI();
-        if (_qrSelectedIdx < 0 || _qrSelectedIdx >= _qrProfiles.length) {
-            showGameAlert('No profile selected to export.'); return;
+        if (!_qrProfile) {
+            showGameAlert('No profile loaded to export.'); return;
         }
-        var profile = _qrProfiles[_qrSelectedIdx];
+        var profile = _qrProfile;
         var safeName = (profile.name || 'profile').replace(/[^\w\s\-]/g, '').replace(/\s+/g, '_');
         var json = JSON.stringify(profile, null, '  ');
         var f = new air.File(air.File.documentsDirectory.nativePath).resolvePath('qr_' + safeName + '.json');
@@ -199,18 +288,18 @@ function _qrImportProfiles() {
             ev.target.addEventListener(air.Event.COMPLETE, function (ev2) {
                 try {
                     var parsed = JSON.parse(ev2.target.data);
-                    // Accept a single profile object (not an array)
                     if (Array.isArray(parsed) || typeof parsed !== 'object' || !parsed.name) {
                         showGameAlert('Import failed: file does not contain a single profile object.\nExport a profile first to see the expected format.'); return;
                     }
                     if (!parsed.id) { parsed.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
                     // If a profile with the same id already exists, give the import a fresh id
                     var existingIds = {};
-                    _qrProfiles.forEach(function (p) { existingIds[p.id] = true; });
+                    _qrFileList.forEach(function (e) { existingIds[e.id] = true; });
                     if (existingIds[parsed.id]) { parsed.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
-                    _qrProfiles.push(parsed);
-                    _qrSave();
-                    _qrSelectedIdx = _qrProfiles.length - 1;
+                    // Save imported profile to its own file, then load it
+                    _qrSaveOne(parsed);
+                    _qrScanFiles();
+                    _qrLoadProfile(parsed.id);
                     _qrRenderAll();
                     game.chatMessage('Quest Runner: "' + parsed.name + '" imported.', 'adventurer');
                 } catch (e) { showGameAlert('Import parse error: ' + e); }
@@ -404,7 +493,7 @@ try {
 
 // ---- Modal open ----
 function _qrOpenModal() {
-    _qrLoad();
+    try { _qrScanFiles(); } catch (e) { game.chatMessage('Quest Runner: scan error: ' + e, 'adventurer'); }
     $("div[role='dialog']:not(#questRunnerModal):visible").modal('hide');
 
     _qrModal = new Modal('questRunnerModal', getImageTag('BuffKingdomOfCaliphs_Reward_Adventurer', '28px') + ' ' + _qrT('title'));
@@ -473,27 +562,38 @@ function _qrRenderSidebar() {
         .text(_qrT('newProfile'))
         .click(function () {
             _qrSaveCurrentFromUI();
+            if (_qrProfile) { _qrSaveOne(_qrProfile); }
             var p = _qrNewProfile();
-            _qrProfiles.push(p);
-            _qrSelectedIdx = _qrProfiles.length - 1;
-            _qrSave();
+            _qrSaveOne(p);
+            _qrScanFiles();
+            _qrProfile = p;
             _qrRenderAll();
         })
         .appendTo($sb);
 
-    // Export / Import row
-    $('<div>').css({ 'display': 'flex', 'gap': '4px', 'margin-bottom': '8px' }).append(
-        $('<button>').attr({ 'class': 'btn btn-default btn-sm', 'title': 'Export all profiles to a JSON file' })
+    // Export / Import / Close row
+    var $actionRow = $('<div>').css({ 'display': 'flex', 'gap': '4px', 'margin-bottom': '8px', 'flex-wrap': 'wrap' });
+    $actionRow.append(
+        $('<button>').attr({ 'class': 'btn btn-default btn-sm', 'title': 'Export loaded profile to a JSON file' })
             .css({ 'flex': '1' })
             .text('\u2913 Export')
             .click(_qrExportProfiles),
-        $('<button>').attr({ 'class': 'btn btn-default btn-sm', 'title': 'Import profiles from a JSON file (merges, skips duplicates)' })
+        $('<button>').attr({ 'class': 'btn btn-default btn-sm', 'title': 'Import a profile from a JSON file' })
             .css({ 'flex': '1' })
             .text('\u2912 Import')
             .click(_qrImportProfiles)
-    ).appendTo($sb);
+    );
+    if (_qrProfile) {
+        $actionRow.append(
+            $('<button>').attr({ 'class': 'btn btn-warning btn-sm', 'title': 'Close loaded profile' })
+                .css({ 'flex': '1' })
+                .text('\u2715 Close')
+                .click(_qrCloseProfile)
+        );
+    }
+    $actionRow.appendTo($sb);
 
-    if (_qrProfiles.length === 0) {
+    if (_qrFileList.length === 0) {
         $('<p>').css({ 'color': '#aaa', 'font-size': '12px' }).text(_qrT('noProfiles')).appendTo($sb);
         return;
     }
@@ -506,8 +606,8 @@ function _qrRenderSidebar() {
         'overflow-y': 'auto'
     }).appendTo($sb);
 
-    _qrProfiles.forEach(function (p, idx) {
-        var active = idx === _qrSelectedIdx;
+    _qrFileList.forEach(function (entry) {
+        var active = _qrProfile && _qrProfile.id === entry.id;
         $('<li>')
             .css({
                 'padding':       '5px 8px',
@@ -519,12 +619,11 @@ function _qrRenderSidebar() {
                 'font-size':     '13px',
                 'word-break':    'break-all'
             })
-            .text(p.name || _qrT('unnamed'))
-            .click((function (i) { return function () {
-                _qrSaveCurrentFromUI();
-                _qrSelectedIdx = i;
+            .text(entry.name || _qrT('unnamed'))
+            .click((function (id) { return function () {
+                _qrLoadProfile(id);
                 _qrRenderAll();
-            }; })(idx))
+            }; })(entry.id))
             .appendTo($list);
     });
 }
@@ -533,12 +632,12 @@ function _qrRenderSidebar() {
 function _qrRenderEditor() {
     var $ed = $('#qrEditor').html('');
 
-    if (_qrSelectedIdx < 0 || _qrSelectedIdx >= _qrProfiles.length) {
+    if (!_qrProfile) {
         $('<p>').css({ 'color': '#aaa', 'margin-top': '20px' }).text(_qrT('noProfiles')).appendTo($ed);
         return;
     }
 
-    var profile = _qrProfiles[_qrSelectedIdx];
+    var profile = _qrProfile;
 
     // ---- Profile name row ----
     var $nameRow = $('<div>').attr({ 'class': 'row', 'style': 'margin-bottom:10px;' });
@@ -554,9 +653,9 @@ function _qrRenderEditor() {
                 .text(_qrT('deleteProfile'))
                 .click(function () {
                     if (!confirm(_qrT('confirm_delete'))) { return; }
-                    _qrProfiles.splice(_qrSelectedIdx, 1);
-                    if (_qrSelectedIdx >= _qrProfiles.length) { _qrSelectedIdx = _qrProfiles.length - 1; }
-                    _qrSave();
+                    if (_qrProfile) { _qrDeleteFile(_qrProfile); }
+                    _qrProfile = null;
+                    _qrScanFiles();
                     _qrRenderAll();
                 })
         )
@@ -1000,8 +1099,8 @@ function _qrMakeStepRow(step, idx) {
         .html('&times;')
         .click((function (i) { return function () {
             _qrSaveCurrentFromUI();
-            _qrProfiles[_qrSelectedIdx].steps.splice(i, 1);
-            _qrScrollToGenIdx = Math.min(i, _qrProfiles[_qrSelectedIdx].steps.length - 1);
+            _qrProfile.steps.splice(i, 1);
+            _qrScrollToGenIdx = Math.min(i, _qrProfile.steps.length - 1);
             _qrRenderEditor();
         }; })(idx));
 
@@ -1128,10 +1227,10 @@ function _qrMakeStepRow(step, idx) {
     return $stepRow;
 }
 
-// ---- Read UI back into the selected profile ----
+// ---- Read UI back into the loaded profile ----
 function _qrSaveCurrentFromUI() {
-    if (_qrSelectedIdx < 0 || _qrSelectedIdx >= _qrProfiles.length) { return; }
-    var profile = _qrProfiles[_qrSelectedIdx];
+    if (!_qrProfile) { return; }
+    var profile = _qrProfile;
     profile.name = $('#qrName').val() || _qrT('unnamed');
 
     profile.adventureNameKey     = $('#qrAdvSel').val() || '';
@@ -1201,24 +1300,25 @@ function _qrSaveCurrentFromUI() {
 // ---- Save & Persist button ----
 function _qrSaveAndPersist() {
     _qrSaveCurrentFromUI();
-    _qrSave();
+    if (_qrProfile) { _qrSaveOne(_qrProfile); }
+    _qrScanFiles();       // refresh file list (name may have changed)
     _qrRenderSidebar();   // refresh sidebar name
     showGameAlert(_qrT('profileSaved'));
 }
 
 // ---- Save As: duplicate current profile with a new name ----
 function _qrSaveAs() {
-    if (_qrSelectedIdx < 0 || _qrSelectedIdx >= _qrProfiles.length) {
-        showGameAlert('No profile selected.'); return;
+    if (!_qrProfile) {
+        showGameAlert('No profile loaded.'); return;
     }
     _qrSaveCurrentFromUI();
-    var src = _qrProfiles[_qrSelectedIdx];
+    var src = _qrProfile;
     var copy = JSON.parse(JSON.stringify(src));
     copy.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     copy.name = src.name + ' (copy)';
-    _qrProfiles.push(copy);
-    _qrSelectedIdx = _qrProfiles.length - 1;
-    _qrSave();
+    _qrSaveOne(copy);
+    _qrScanFiles();
+    _qrProfile = copy;
     _qrRenderAll();
     showGameAlert('Profile duplicated as "' + copy.name + '".');
 }
@@ -1293,8 +1393,8 @@ function _qrRun() {
     _qrSaveCurrentFromUI();
     _qrSave();
 
-    if (_qrSelectedIdx < 0 || _qrSelectedIdx >= _qrProfiles.length) { return; }
-    var profile = _qrProfiles[_qrSelectedIdx];
+    if (!_qrProfile) { return; }
+    var profile = _qrProfile;
 
     var errors = _qrValidate(profile);
     if (errors.length > 0) {
@@ -2323,9 +2423,9 @@ function _qrBsUpdateControls() {
     $('#qrBsContinueBtn').toggle(!!paused);
     $('#qrBsRestartBtn').toggle(!!paused);
     // Footer mirror controls — only visible while minimized
-    $('#qrBsStopBtnFtr').toggle(minimized && !!(running || paused));
-    $('#qrBsContinueBtnFtr').toggle(minimized && !!paused);
-    $('#qrBsRestartBtnFtr').toggle(minimized && !!paused);
+    $('#qrBsStopBtnFtr').toggle(!!(running || paused));
+    $('#qrBsContinueBtnFtr').toggle(!!paused);
+    $('#qrBsRestartBtnFtr').toggle(!!paused);
     // Step progress panel — only while minimized and script active
     var showProgress = minimized && !!(running || paused) && _qrBsState && _qrBsState.steps;
     $('#qrBsStepProgress').toggle(!!showProgress);
@@ -2377,6 +2477,7 @@ function _qrBsUpdateStepProgress(idx, steps) {
 }
 
 function _qrBsStop() {
+    _qrBsStopFlag = true;
     if (!_qrBsState) { return; }
     _qrBsState.stopped = true;
     _qrRunning = false;
@@ -2387,14 +2488,15 @@ function _qrBsStop() {
 
 function _qrRunBattleScript(startIdx) {
     _qrSaveCurrentFromUI();
-    var profile = _qrSelectedIdx >= 0 ? _qrProfiles[_qrSelectedIdx] : null;
-    if (!profile) { showGameAlert('No profile selected'); return; }
+    var profile = _qrProfile;
+    if (!profile) { showGameAlert('No profile loaded'); return; }
     if (!profile.battleScript || profile.battleScript.length === 0) {
         showGameAlert('No battle script steps defined.'); return;
     }
     if (_qrRunning) { showGameAlert('Battle script is already running.'); return; }
 
     startIdx = startIdx || 0;
+    _qrBsStopFlag = false;
     _qrBsState = { steps: profile.battleScript.slice(), stepIdx: startIdx, stopped: false, profile: profile };
     _qrRunning = true;
     _qrModal.withFooter('.qrRunBtn').prop('disabled', true);
@@ -2424,7 +2526,7 @@ function _qrRunBattleScript(startIdx) {
     var state = _qrBsState;
 
     function runNextStep() {
-        if (state.stopped) { return; }
+        if (state.stopped || _qrBsStopFlag) { state.stopped = true; return; }
         if (state.stepIdx >= state.steps.length) {
             $('#qrBsSteps .qrBsStep').css('outline', '');
             finish('All steps complete.');
@@ -3181,26 +3283,163 @@ function _qrRunBattleScript(startIdx) {
                 }
 
                 case 'RETURN_HOME': {
+                    // Self-contained loop: collect collectibles → claim quests → repeat until clear → go home
                     var rhHomeId = game.gi.mCurrentPlayer.GetHomeZoneId();
-                    if (game.gi.mCurrentViewedZoneID === rhHomeId) {
-                        game.chatMessage('RETURN_HOME: already on home island.', 'adventurer');
-                        setTimeout(runNextStep, 500);
-                        break;
+
+                    function rhCountCollectibles() {
+                        var count = 0;
+                        try {
+                            var cMgr = swmmo.getDefinitionByName('Collections::CollectionsManager').getInstance();
+                            var qtMap = {};
+                            if (game.gi.mCurrentPlayer.mIsAdventureZone && game.gi.mNewQuestManager.GetQuestPool().IsAnyQuestsActive()) {
+                                $.each(game.gi.mNewQuestManager.GetQuestPool().GetQuest_vector(), function (i, q) {
+                                    if (q.isFinished() || !q.IsQuestActive()) { return; }
+                                    $.each(q.mQuestDefinition.questTriggers_vector, function (n, trig) {
+                                        if (trig.name_string) { qtMap[trig.name_string] = true; }
+                                    });
+                                });
+                            }
+                            game.gi.mCurrentPlayerZone.mStreetDataMap.GetBuildings_vector().forEach(function (b) {
+                                if (!b) { return; }
+                                var goc = b.GetGOContainer();
+                                if (
+                                    cMgr.getBuildingIsCollectible(b.GetBuildingName_string()) ||
+                                    (qtMap[b.GetBuildingName_string()] && b.mIsSelectable &&
+                                     goc.mIsAttackable && !goc.mIsLeaderCamp && goc.ui !== 'enemy' &&
+                                     (b.GetArmy() == null || !b.GetArmy().HasUnits()))
+                                ) { count++; }
+                            });
+                        } catch (e) {}
+                        return count;
                     }
-                    game.chatMessage('RETURN_HOME: navigating back to home island\u2026', 'adventurer');
-                    try { game.gi.visitZone(rhHomeId); } catch (e) {
-                        game.chatMessage('RETURN_HOME: visitZone error: ' + e, 'adventurer');
-                        setTimeout(runNextStep, 1000);
-                        break;
+
+                    function rhCollectAll(done) {
+                        try {
+                            var cMgr = swmmo.getDefinitionByName('Collections::CollectionsManager').getInstance();
+                            var cq = new TimedQueue(1000);
+                            var qtMap = {};
+                            if (game.gi.mCurrentPlayer.mIsAdventureZone && game.gi.mNewQuestManager.GetQuestPool().IsAnyQuestsActive()) {
+                                $.each(game.gi.mNewQuestManager.GetQuestPool().GetQuest_vector(), function (i, q) {
+                                    if (q.isFinished() || !q.IsQuestActive()) { return; }
+                                    $.each(q.mQuestDefinition.questTriggers_vector, function (n, trig) {
+                                        if (trig.name_string) { qtMap[trig.name_string] = true; }
+                                    });
+                                });
+                            }
+                            game.gi.mCurrentPlayerZone.mStreetDataMap.GetBuildings_vector().forEach(function (b) {
+                                if (!b) { return; }
+                                var goc = b.GetGOContainer();
+                                if (
+                                    cMgr.getBuildingIsCollectible(b.GetBuildingName_string()) ||
+                                    (qtMap[b.GetBuildingName_string()] && b.mIsSelectable &&
+                                     goc.mIsAttackable && !goc.mIsLeaderCamp && goc.ui !== 'enemy' &&
+                                     (b.GetArmy() == null || !b.GetArmy().HasUnits()))
+                                ) { cq.add(function () { game.gi.SelectBuilding(b); }); }
+                            });
+                            if (cq.len() === 0) { done(); return; }
+                            game.chatMessage('RETURN_HOME: collecting ' + cq.len() + ' collectible(s)\u2026', 'adventurer');
+                            cq.add(function () { done(); });
+                            cq.run();
+                        } catch (e) { done(); }
                     }
-                    var rhPoll = setInterval(function () {
-                        if (state.stopped) { clearInterval(rhPoll); return; }
-                        if (game.gi.mCurrentViewedZoneID === rhHomeId) {
-                            clearInterval(rhPoll);
-                            game.chatMessage('RETURN_HOME: arrived on home island.', 'adventurer');
-                            setTimeout(runNextStep, 2000);
+
+                    function rhCountFinished() {
+                        var cnt = 0;
+                        try {
+                            $.each(game.gi.mNewQuestManager.GetQuestPool().GetQuest_vector(), function (i, q) {
+                                try { if (q && q.isFinished && q.isFinished()) { cnt++; } } catch (e) {}
+                            });
+                        } catch (e) {}
+                        return cnt;
+                    }
+
+                    function rhClaimAll(done) {
+                        if (typeof qlAutoClaimAll === 'function') {
+                            _qrMinimizeModal();
+                            qlAutoClaimAll(function (claimed) {
+                                _qrRestoreModal();
+                                game.chatMessage('RETURN_HOME: auto-claimed ' + claimed + ' quest(s).', 'adventurer');
+                                done();
+                            });
+                        } else {
+                            game.chatMessage('RETURN_HOME: no auto-claim available \u2014 skipping quests.', 'adventurer');
+                            done();
                         }
-                    }, 2000);
+                    }
+
+                    // Main loop: collectibles → quests → recheck
+                    var rhPass = 0;
+                    function rhLoop() {
+                        if (state.stopped || _qrBsStopFlag) { state.stopped = true; return; }
+                        rhPass++;
+                        if (rhPass > 20) {
+                            game.chatMessage('RETURN_HOME: safety limit (20 passes) reached \u2014 proceeding home.', 'adventurer');
+                            rhGoHome();
+                            return;
+                        }
+
+                        var cCount = rhCountCollectibles();
+                        if (cCount > 0) {
+                            game.chatMessage('RETURN_HOME: pass ' + rhPass + ' \u2014 ' + cCount + ' collectible(s) pending\u2026', 'adventurer');
+                            rhCollectAll(function () {
+                                if (state.stopped) { return; }
+                                // After collecting, wait a moment then check quests
+                                setTimeout(function () {
+                                    if (state.stopped) { return; }
+                                    var fCount = rhCountFinished();
+                                    if (fCount > 0) {
+                                        game.chatMessage('RETURN_HOME: ' + fCount + ' finished quest(s) pending\u2026', 'adventurer');
+                                        rhClaimAll(function () {
+                                            if (state.stopped) { return; }
+                                            setTimeout(rhLoop, 2000);
+                                        });
+                                    } else {
+                                        setTimeout(rhLoop, 2000);
+                                    }
+                                }, 2000);
+                            });
+                            return;
+                        }
+
+                        var fCount = rhCountFinished();
+                        if (fCount > 0) {
+                            game.chatMessage('RETURN_HOME: pass ' + rhPass + ' \u2014 ' + fCount + ' finished quest(s) pending\u2026', 'adventurer');
+                            rhClaimAll(function () {
+                                if (state.stopped) { return; }
+                                setTimeout(rhLoop, 2000);
+                            });
+                            return;
+                        }
+
+                        // All clear
+                        game.chatMessage('RETURN_HOME: all collectibles and quests cleared.', 'adventurer');
+                        rhGoHome();
+                    }
+
+                    function rhGoHome() {
+                        if (state.stopped) { return; }
+                        if (game.gi.mCurrentViewedZoneID === rhHomeId) {
+                            game.chatMessage('RETURN_HOME: already on home island.', 'adventurer');
+                            setTimeout(runNextStep, 500);
+                            return;
+                        }
+                        game.chatMessage('RETURN_HOME: navigating back to home island\u2026', 'adventurer');
+                        try { game.gi.visitZone(rhHomeId); } catch (e) {
+                            game.chatMessage('RETURN_HOME: visitZone error: ' + e, 'adventurer');
+                            setTimeout(runNextStep, 1000);
+                            return;
+                        }
+                        var rhPoll = setInterval(function () {
+                            if (state.stopped) { clearInterval(rhPoll); return; }
+                            if (game.gi.mCurrentViewedZoneID === rhHomeId) {
+                                clearInterval(rhPoll);
+                                game.chatMessage('RETURN_HOME: arrived on home island.', 'adventurer');
+                                setTimeout(runNextStep, 2000);
+                            }
+                        }, 2000);
+                    }
+
+                    rhLoop();
                     break;
                 }
 
