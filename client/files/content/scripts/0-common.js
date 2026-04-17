@@ -574,10 +574,10 @@ Modal.prototype = {
     show: function() {
         $("div[role='dialog']:not(" + this.id + "):visible")
             .modal("hide"), $(this.id + ':not(:visible)')
-            .modal({ backdrop: "static" })
+            .modal({ backdrop: false })
     },
     sshow: function() {
-        $(this.sId + ':not(:visible)').modal({ backdrop: "static" })
+        $(this.sId + ':not(:visible)').modal({ backdrop: false })
     },
     create: function() {
         !($(this.id)
@@ -699,6 +699,13 @@ Modal.prototype = {
         return t + " .modal-dialog"
     }
 };
+
+/* Make modals click-through so the game map stays interactive */
+(function() {
+    var style = document.createElement('style');
+    style.textContent = '.modal { pointer-events: none; } .modal-dialog { pointer-events: auto; }';
+    document.head.appendChild(style);
+})();
 
 /* Settings */
 

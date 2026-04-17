@@ -55,7 +55,7 @@ var ShortcutTrader = (function () {
             }
 
             ActionsService.init();
-            $('#' + UIMap.ids.modal + ':not(:visible)').modal({backdrop: "static"});
+            $('#' + UIMap.ids.modal + ':not(:visible)').modal({backdrop: false});
         } catch (e) {
             debug(e);
         }

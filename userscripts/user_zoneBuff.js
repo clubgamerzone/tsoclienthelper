@@ -74,7 +74,7 @@ function SearchZoneBuffHandler(event) {
     });
     _updateZoneBuffModalData();
     $('#searchZoneBuffModal:not(:visible)').modal({
-        backdrop: 'static'
+        backdrop: false
     });
 
     $("#searchZoneBuffModal .modal-footer").prepend([

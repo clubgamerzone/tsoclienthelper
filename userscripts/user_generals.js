@@ -411,7 +411,7 @@ try {
 		_exudMakeGeneralsTable();
 }
 catch (egen) {}	
-	$('#udGeneralsModal:not(:visible)').modal({backdrop: "static"});	
+	$('#udGeneralsModal:not(:visible)').modal({backdrop: false});	
 	_exudGeneralsOpening = false;
 }
 
@@ -523,7 +523,7 @@ function _exudGeneralsOptions()
 	$('#udGeneralsModalsettingsData').html(_exudGeneralsOptionsCreateSettings());
 	$('#udGeneralsModalsettingsData').css("height", "300px");
 	$('#udGeneralsModalsettings').css("height", "900px");
-	$('#udGeneralsModalsettings:not(:visible)').modal({backdrop: "static"});
+	$('#udGeneralsModalsettings:not(:visible)').modal({backdrop: false});
 
 	$('#_exudChangeGeneralSortFloatBtn').change(function(){
 		if (_exudGeneralsOpening) return;

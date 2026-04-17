@@ -147,7 +147,7 @@ function SearchArchitecturesHandler(event) {
         _updateArchitecturesModalData();
     });
     _updateArchitecturesModalData();
-    $('#searchArchitecturesModal:not(:visible)').modal({ backdrop: 'static' });
+    $('#searchArchitecturesModal:not(:visible)').modal({ backdrop: false });
 
 			$("#searchArchitecturesModal .modal-footer").prepend([
 			$('<button>').attr({ "class": "btn btn-warning upgradeReset" }).text(getText('btn_reset')),

@@ -99,7 +99,7 @@ try{
 }
 catch (efr) {}
 			
-	$('#udFriendsModal:not(:visible)').modal({ backdrop: "static" });
+	$('#udFriendsModal:not(:visible)').modal({ backdrop: false });
 }
 function _exudFriendsSaveSettings()
 {

@@ -1247,6 +1247,6 @@ function _gmMenuHandler() {
         _gmRefresh();
     } catch (e) {}
 
-    $('#gmModal:not(:visible)').modal({ backdrop: 'static' });
+    $('#gmModal:not(:visible)').modal({ backdrop: false });
 }
 

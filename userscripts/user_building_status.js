@@ -18,8 +18,8 @@ var _bsSectionDefs = [
     },
     {
         label:    'Wood & Paper',
-        patterns: ['WOODCUTTER','SAWMILL','FORESTER','CHARCOAL','LUMBERMILL','PAPERMILL',
-                   'WOODWORK','LUMBERJACK','BARKMILL','BOOKBINDER',
+        patterns: ['WOODCUTTER','CUTTER','SAWMILL','FORESTER','CHARCOAL','LUMBERMILL','PAPERMILL',
+                   'WOODWORK','LUMBERJACK','BARKMILL','BOOKBINDER','HARDWOOD',
                    'COKING','WOODYARD','FINESMITH','LETTERSMITH','ORNAMENTALSMITH','RECYCLING']
     },
     {
@@ -146,7 +146,7 @@ function _bsMenuHandler() {
 
     } catch (e) {}
 
-    $('#bsModal:not(:visible)').modal({ backdrop: 'static' });
+    $('#bsModal:not(:visible)').modal({ backdrop: false });
 }
 
 // ---- Refresh: collect data + render + schedule next auto-refresh ----
@@ -317,7 +317,10 @@ function _bsGetData() {
                 } catch (e) {}
 
                 if (entry.DepositAmt === 0) {
-                    exhausted.push(entry);
+                    var exCat = _bsClassify(nameKey);
+                    if (exCat !== 'Wood & Paper' && exCat !== 'Food & Farming') {
+                        exhausted.push(entry);
+                    }
                     return;
                 }
 

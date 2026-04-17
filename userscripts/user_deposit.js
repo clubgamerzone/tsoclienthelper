@@ -107,7 +107,7 @@ try{
 }
 catch (edep) {}
 	
-	$('#DepositViewerModal:not(:visible)').modal({ backdrop: "static" });
+	$('#DepositViewerModal:not(:visible)').modal({ backdrop: false });
 }
 
 function _exudDepositViewerMakeModal() {

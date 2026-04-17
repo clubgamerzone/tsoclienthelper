@@ -241,7 +241,7 @@ function _exudUserBuildingListMenuHandler(event) {
 	}
 	catch (e) {}
 	
-	$('#UserBuildingListModal:not(:visible)').modal({ backdrop: "static" });
+	$('#UserBuildingListModal:not(:visible)').modal({ backdrop: false });
 }
 
 function _exudUserBuildingListClear()
@@ -647,7 +647,7 @@ try{
 	
 	_exudUserBuildingMonitorRefresh();
 	
-	$('#UserBuildingMonitorModal:not(:visible)').modal({ backdrop: "static" });
+	$('#UserBuildingMonitorModal:not(:visible)').modal({ backdrop: false });
 }
 function _exudUserBuildingMonitorStart()
 {

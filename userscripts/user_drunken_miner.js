@@ -117,7 +117,7 @@
             _DM_SetConfigValues();
 
             $('#DrunkenMinerModal:not(:visible)').modal({
-                backdrop: "static"
+                backdrop: false
             });
         } catch (e) {
             debug(e)

@@ -210,7 +210,7 @@ function DepositDepletedMenuHandler(event) {
     });
 
     $('#DepositDepletedModal:not(:visible)').modal({
-        backdrop: "static"
+        backdrop: false
     });
 }
 

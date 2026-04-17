@@ -142,8 +142,8 @@ function _qrProfileDir() {
 }
 
 function _qrProfileFileFor(profile) {
-    var id = profile.id || 'unknown';
-    return _qrProfileDir().resolvePath(id + '.json');
+    var safeName = (profile.name || profile.id || 'unknown').replace(/[^\w\s\-]/g, '').replace(/\s+/g, '_');
+    return _qrProfileDir().resolvePath(safeName + '.json');
 }
 
 // Scan the profile directory and build a lightweight {id, name} list for the sidebar.
@@ -235,14 +235,33 @@ function _qrScanFiles() {
 
 // Load a single profile by id into _qrProfile.
 function _qrLoadProfile(id) {
-    _qrSaveCurrentFromUI();  // save any unsaved edits from the previous profile
-    if (_qrProfile) { _qrSaveOne(_qrProfile); }
+    _qrSaveCurrentFromUI();
     _qrProfile = null;
     try {
-        var pf = _qrProfileDir().resolvePath(id + '.json');
-        if (!pf.exists) { showGameAlert('Profile file not found: ' + id); return; }
+        // Search all JSON files in the profile directory for a matching id
+        var dir = _qrProfileDir();
+        var files = dir.getDirectoryListing();
+        var foundFile = null;
+        for (var i = 0; i < files.length; i++) {
+            var f = files[i];
+            if (f.isDirectory || !f.name.match(/\.json$/i)) { continue; }
+            try {
+                var fs2 = new air.FileStream();
+                fs2.open(f, air.FileMode.READ);
+                var raw2 = fs2.readUTFBytes(fs2.bytesAvailable);
+                fs2.close();
+                var p2 = JSON.parse(raw2);
+                if (p2 && p2.id === id) { foundFile = f; break; }
+            } catch (e) {}
+        }
+        // Fallback: try old id-based filename
+        if (!foundFile) {
+            var legacy = dir.resolvePath(id + '.json');
+            if (legacy.exists) { foundFile = legacy; }
+        }
+        if (!foundFile) { showGameAlert('Profile file not found: ' + id); return; }
         var fs = new air.FileStream();
-        fs.open(pf, air.FileMode.READ);
+        fs.open(foundFile, air.FileMode.READ);
         var raw = fs.readUTFBytes(fs.bytesAvailable);
         fs.close();
         var p = JSON.parse(raw);
@@ -255,8 +274,6 @@ function _qrLoadProfile(id) {
 
 // Unload the current profile (close).
 function _qrCloseProfile() {
-    _qrSaveCurrentFromUI();
-    if (_qrProfile) { _qrSaveOne(_qrProfile); }
     _qrProfile = null;
     _qrRenderAll();
 }
@@ -273,6 +290,7 @@ function _qrSaveOne(profile) {
         fs.open(pf, air.FileMode.WRITE);
         fs.writeUTFBytes(JSON.stringify(profile, null, '  '));
         fs.close();
+        game.chatMessage('Quest Runner: saved "' + profile.name + '" → ' + pf.nativePath, 'adventurer');
     } catch (e) {
         game.chatMessage('Quest Runner: save error for "' + profile.name + '": ' + e, 'adventurer');
     }
@@ -314,14 +332,10 @@ function _qrImportProfiles() {
                         showGameAlert('Import failed: file does not contain a single profile object.\nExport a profile first to see the expected format.'); return;
                     }
                     if (!parsed.id) { parsed.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
-                    // If a profile with the same id already exists, give the import a fresh id
-                    var existingIds = {};
-                    _qrFileList.forEach(function (e) { existingIds[e.id] = true; });
-                    if (existingIds[parsed.id]) { parsed.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
                     // Save imported profile to its own file, then load it
+                    _qrSaveCurrentFromUI();
                     _qrSaveOne(parsed);
-                    _qrScanFiles();
-                    _qrLoadProfile(parsed.id);
+                    _qrProfile = parsed;
                     _qrRenderAll();
                     game.chatMessage('Quest Runner: "' + parsed.name + '" imported.', 'adventurer');
                 } catch (e) { showGameAlert('Import parse error: ' + e); }
@@ -515,7 +529,6 @@ try {
 
 // ---- Modal open ----
 function _qrOpenModal() {
-    try { _qrScanFiles(); } catch (e) { game.chatMessage('Quest Runner: scan error: ' + e, 'adventurer'); }
     $("div[role='dialog']:not(#questRunnerModal):visible").modal('hide');
 
     _qrModal = new Modal('questRunnerModal', getImageTag('BuffKingdomOfCaliphs_Reward_Adventurer', '28px') + ' ' + _qrT('title'));
@@ -584,12 +597,40 @@ function _qrRenderSidebar() {
         .text(_qrT('newProfile'))
         .click(function () {
             _qrSaveCurrentFromUI();
-            if (_qrProfile) { _qrSaveOne(_qrProfile); }
             var p = _qrNewProfile();
             _qrSaveOne(p);
-            _qrScanFiles();
             _qrProfile = p;
             _qrRenderAll();
+        })
+        .appendTo($sb);
+
+    // Load Profile from file picker
+    $('<button>')
+        .attr({ 'class': 'btn btn-success btn-block' })
+        .css({ 'margin-bottom': '6px' })
+        .text('Load Profile')
+        .click(function () {
+            try {
+                var startDir = _qrProfileDir();
+                var f = new air.File(startDir.nativePath);
+                var filter = new air.FileFilter('JSON profiles', '*.json');
+                f.addEventListener(air.Event.SELECT, function (ev) {
+                    ev.target.addEventListener(air.Event.COMPLETE, function (ev2) {
+                        try {
+                            var parsed = JSON.parse(ev2.target.data);
+                            if (!parsed || typeof parsed !== 'object' || !parsed.name) {
+                                showGameAlert('Invalid profile file.'); return;
+                            }
+                            _qrSaveCurrentFromUI();
+                            _qrProfile = parsed;
+                            _qrRenderAll();
+                            game.chatMessage('Quest Runner: loaded "' + parsed.name + '"', 'adventurer');
+                        } catch (e) { showGameAlert('Load error: ' + e); }
+                    });
+                    ev.target.load();
+                });
+                f.browseForOpen('Load profile', [filter]);
+            } catch (e) { showGameAlert('Load failed: ' + e); }
         })
         .appendTo($sb);
 
@@ -615,43 +656,23 @@ function _qrRenderSidebar() {
     }
     $actionRow.appendTo($sb);
 
-    if (_qrFileList.length === 0) {
+    // Show currently loaded profile name
+    if (_qrProfile) {
+        $('<div>').css({ 'color': '#aaa', 'font-size': '12px', 'margin-top': '6px' })
+            .html('Loaded: <strong style="color:#fff">' + (_qrProfile.name || 'unnamed') + '</strong>')
+            .appendTo($sb);
+    } else {
         $('<p>').css({ 'color': '#aaa', 'font-size': '12px' }).text(_qrT('noProfiles')).appendTo($sb);
-        return;
     }
-
-    var $list = $('<ul>').css({
-        'list-style': 'none',
-        'padding': '0',
-        'margin': '0',
-        'max-height': '380px',
-        'overflow-y': 'auto'
-    }).appendTo($sb);
-
-    _qrFileList.forEach(function (entry) {
-        var active = _qrProfile && _qrProfile.id === entry.id;
-        $('<li>')
-            .css({
-                'padding':       '5px 8px',
-                'margin-bottom': '3px',
-                'border-radius': '4px',
-                'cursor':        'pointer',
-                'background':    active ? '#4a6fa5' : '#333',
-                'color':         active ? '#fff' : '#ddd',
-                'font-size':     '13px',
-                'word-break':    'break-all'
-            })
-            .text(entry.name || _qrT('unnamed'))
-            .click((function (id) { return function () {
-                _qrLoadProfile(id);
-                _qrRenderAll();
-            }; })(entry.id))
-            .appendTo($list);
-    });
 }
 
 // ---- Editor (right panel) ----
 function _qrRenderEditor() {
+    // Preserve scroll position across re-renders
+    var $scrollParent = $('#questRunnerModalData').closest('.modal-body');
+    if (!$scrollParent.length) { $scrollParent = $('#questRunnerModalData'); }
+    var savedScroll = $scrollParent.length ? $scrollParent.scrollTop() : 0;
+
     var $ed = $('#qrEditor').html('');
 
     if (!_qrProfile) {
@@ -677,7 +698,6 @@ function _qrRenderEditor() {
                     if (!confirm(_qrT('confirm_delete'))) { return; }
                     if (_qrProfile) { _qrDeleteFile(_qrProfile); }
                     _qrProfile = null;
-                    _qrScanFiles();
                     _qrRenderAll();
                 })
         )
@@ -947,23 +967,22 @@ function _qrRenderEditor() {
     // Initial diff calculation after everything is rendered
     setTimeout(_qrRefreshDiff, 0);
 
-    // Auto-scroll to the targeted step after render
+    // Auto-scroll to the targeted step after render, or restore previous scroll position
     setTimeout(function () {
-        var $scrollParent = $('#questRunnerModalData').closest('.modal-body');
-        if (!$scrollParent.length) { $scrollParent = $('#questRunnerModalData'); }
         if (_qrScrollToBsIdx >= 0) {
             var $target = $('#qrBsSteps .qrBsStep[data-idx="' + _qrScrollToBsIdx + '"]');
             if ($target.length && $scrollParent.length) {
                 $scrollParent.animate({ scrollTop: $scrollParent.scrollTop() + $target.position().top - $scrollParent.height() / 3 }, 200);
             }
             _qrScrollToBsIdx = -1;
-        }
-        if (_qrScrollToGenIdx >= 0) {
+        } else if (_qrScrollToGenIdx >= 0) {
             var $genTarget = $('#qrSteps .qrStep[data-idx="' + _qrScrollToGenIdx + '"]');
             if ($genTarget.length && $scrollParent.length) {
                 $scrollParent.animate({ scrollTop: $scrollParent.scrollTop() + $genTarget.position().top - $scrollParent.height() / 3 }, 200);
             }
             _qrScrollToGenIdx = -1;
+        } else if (savedScroll > 0 && $scrollParent.length) {
+            $scrollParent.scrollTop(savedScroll);
         }
     }, 50);
 }
@@ -1323,11 +1342,21 @@ function _qrSaveCurrentFromUI() {
 
 // ---- Save & Persist button ----
 function _qrSaveAndPersist() {
+    // Remember old filename before UI changes the name
+    var oldFile = _qrProfile ? _qrProfileFileFor(_qrProfile) : null;
     _qrSaveCurrentFromUI();
-    if (_qrProfile) { _qrSaveOne(_qrProfile); }
-    _qrScanFiles();       // refresh file list (name may have changed)
+    if (_qrProfile) {
+        var newFile = _qrProfileFileFor(_qrProfile);
+        // If name changed, delete old file
+        if (oldFile && oldFile.nativePath !== newFile.nativePath) {
+            try { if (oldFile.exists) { oldFile.deleteFile(); } } catch (e) {}
+        }
+        _qrSaveOne(_qrProfile);
+        showGameAlert('Profile saved.\n' + newFile.nativePath);
+    } else {
+        showGameAlert(_qrT('profileSaved'));
+    }
     _qrRenderSidebar();   // refresh sidebar name
-    showGameAlert(_qrT('profileSaved'));
 }
 
 // ---- Save As: duplicate current profile with a new name ----
@@ -1341,7 +1370,6 @@ function _qrSaveAs() {
     copy.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     copy.name = src.name + ' (copy)';
     _qrSaveOne(copy);
-    _qrScanFiles();
     _qrProfile = copy;
     _qrRenderAll();
     showGameAlert('Profile duplicated as "' + copy.name + '".');

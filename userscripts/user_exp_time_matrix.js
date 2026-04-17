@@ -426,7 +426,7 @@ explorerTimeMatrixMenuHandler = function (event) {
     explorerTimeMatrix.setModalBindings();
 
     $("#" + modalName + ":not(:visible)").modal({
-        backdrop: "static",
+        backdrop: false,
     });
 
   } catch (error) {

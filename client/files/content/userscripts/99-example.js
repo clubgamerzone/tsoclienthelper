@@ -12,7 +12,7 @@ function ExampleMenuHandler(event)
 	// bind buttons
 	$('#exampleModalData .showlevelbtn').click(ex_get_level);
 	// show modal
-	$('#exampleModal:not(:visible)').modal({backdrop: "static"});
+$('#exampleModal:not(:visible)').modal({backdrop: false});
 }
 
 function ex_get_level()
