@@ -150,42 +150,64 @@ function _qrProfileFileFor(profile) {
 // Does NOT load full profile data — use _qrLoadProfile(id) for that.
 function _qrScanFiles() {
     _qrFileList = [];
-    // ── Migrate from old formats on first run ──
+    // ── Merge profiles from old monolithic files that are missing individual files ──
     var dir = _qrProfileDir();
     var hasMigrated = false;
     try {
-        var listing = dir.getDirectoryListing();
-        var hasFiles = false;
-        for (var k = 0; k < listing.length; k++) {
-            if (!listing[k].isDirectory && listing[k].name.match(/\.json$/i)) { hasFiles = true; break; }
-        }
-        if (!hasFiles) {
-            var migrated = [];
+        // Collect existing individual-file IDs
+        var existingIds = {};
+        try {
+            var listing = dir.getDirectoryListing();
+            for (var k = 0; k < listing.length; k++) {
+                if (!listing[k].isDirectory && listing[k].name.match(/\.json$/i)) {
+                    existingIds[listing[k].name.replace(/\.json$/i, '')] = true;
+                }
+            }
+        } catch (e) {}
+        // Gather profiles from old monolithic files (both possible locations)
+        var candidates = [];
+        var oldPaths = [
+            air.File.applicationStorageDirectory.resolvePath('quest_runner_profiles.json')
+        ];
+        try {
+            var portablePath = air.File.applicationDirectory.resolvePath('quest_runner_profiles.json');
+            if (portablePath.exists) { oldPaths.push(portablePath); }
+        } catch (e) {}
+        for (var op = 0; op < oldPaths.length; op++) {
             try {
-                var oldFile = air.File.applicationStorageDirectory.resolvePath('quest_runner_profiles.json');
+                var oldFile = oldPaths[op];
                 if (oldFile.exists) {
                     var ofs = new air.FileStream();
                     ofs.open(oldFile, air.FileMode.READ);
                     var oraw = ofs.readUTFBytes(ofs.bytesAvailable);
                     ofs.close();
                     var oarr = JSON.parse(oraw);
-                    if (Array.isArray(oarr)) { migrated = oarr; }
+                    if (Array.isArray(oarr)) {
+                        for (var oi = 0; oi < oarr.length; oi++) { candidates.push(oarr[oi]); }
+                    }
                 }
             } catch (e) {}
-            if (migrated.length === 0) {
-                try {
-                    var d = readSettings(null, _qrSettingsKey);
-                    if (d && Array.isArray(d.profiles)) { migrated = d.profiles; }
-                } catch (e) {}
+        }
+        if (candidates.length === 0) {
+            try {
+                var d = readSettings(null, _qrSettingsKey);
+                if (d && Array.isArray(d.profiles)) { candidates = d.profiles; }
+            } catch (e) {}
+        }
+        // Only migrate profiles whose individual file doesn't already exist
+        var mergedCount = 0;
+        for (var ci = 0; ci < candidates.length; ci++) {
+            var cp = candidates[ci];
+            if (!cp.id) { cp.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+            if (!existingIds[cp.id]) {
+                _qrSaveOne(cp);
+                existingIds[cp.id] = true;
+                mergedCount++;
             }
-            if (migrated.length > 0) {
-                migrated.forEach(function (p) {
-                    if (!p.id) { p.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
-                    _qrSaveOne(p);
-                });
-                hasMigrated = true;
-                game.chatMessage('Quest Runner: migrated ' + migrated.length + ' profile(s) to individual files.', 'adventurer');
-            }
+        }
+        if (mergedCount > 0) {
+            hasMigrated = true;
+            game.chatMessage('Quest Runner: migrated ' + mergedCount + ' profile(s) to individual files.', 'adventurer');
         }
     } catch (e) {}
 
@@ -1291,7 +1313,9 @@ function _qrSaveCurrentFromUI() {
             try { armyData = JSON.parse($row.attr('data-army') || '{}'); } catch (e) {}
         }
         var claimWaitSecs = parseInt($row.find('.qrCqWait').val(), 10) || 5;
+        var targetGrid  = parseInt($row.attr('data-target-grid') || '0', 10) || 0;
         var stepObj = { type: type, generalUID: genUID, generalName: genName, buildingName: bldName, buildingKey: bldKey, buildingDisplay: bldDisp, army: armyData, seconds: seconds, claimWaitSecs: claimWaitSecs };
+        if (targetGrid)  { stepObj.targetGrid  = targetGrid; }
         newBs.push(stepObj);
     });
     profile.battleScript = newBs;
@@ -1974,12 +1998,14 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         DELAY:            '#3a3a3a',
         COLLECTIBLES:     '#4a3a00',
         FILL_AND_RETURN:  '#1a3a6b',
-        CLAIM_QUESTS:     '#1a5c1a'
+        CLAIM_QUESTS:     '#1a5c1a',
+        COLLECT_ALL_QUESTS: '#6b5c1a',
+        TRANSFER_TO_ENEMY_GARRISON: '#5c2a6b'
     };
-    var needsGeneral  = ['MOVE', 'WAIT_ZONE', 'WAIT_AT_GARRISON', 'WAIT_ATTACKING', 'WAIT_GARRISON', 'ATTACK', 'WAIT_IDLE', 'UNLOAD', 'LOAD_ARMY'].indexOf(bsStep.type) >= 0;
+    var needsGeneral  = ['MOVE', 'WAIT_ZONE', 'WAIT_AT_GARRISON', 'WAIT_ATTACKING', 'WAIT_GARRISON', 'ATTACK', 'WAIT_IDLE', 'UNLOAD', 'LOAD_ARMY', 'TRANSFER_TO_ENEMY_GARRISON'].indexOf(bsStep.type) >= 0;
     var isFillReturn  = bsStep.type === 'FILL_AND_RETURN';
     var needsArmy     = bsStep.type === 'LOAD_ARMY';
-    var needsBuilding = ['MOVE', 'WAIT_GARRISON', 'ATTACK'].indexOf(bsStep.type) >= 0;
+    var needsBuilding = ['MOVE', 'WAIT_GARRISON', 'ATTACK', 'TRANSFER_TO_ENEMY_GARRISON'].indexOf(bsStep.type) >= 0;
     var isDelay       = bsStep.type === 'DELAY';
 
     var $row = $('<div>').attr({ 'class': 'qrBsStep', 'data-idx': idx, 'data-type': bsStep.type,
@@ -2001,20 +2027,22 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
     var $typeSel = $('<select>').attr('class', 'form-control input-xs qrBsTypeSel')
         .css({ 'font-weight': 'bold', 'font-size': '11px', 'flex-shrink': '0', 'width': '175px' });
     var ALL_TYPES = [
-        ['MOVE',             'MOVE \u2192 garrison'],
-        ['ATTACK',           'ATTACK \u00d7 building'],
-        ['WAIT_ZONE',        'WAIT \u2014 arrives on island'],
-        ['WAIT_AT_GARRISON', 'WAIT \u2014 ready at garrison'],
-        ['WAIT_ATTACKING',   'WAIT \u2014 leaves garrison'],
-        ['WAIT_GARRISON',    'WAIT \u2014 reaches position'],
-        ['WAIT_IDLE',        'WAIT \u2014 finishes task'],
-        ['UNLOAD',           'UNLOAD army'],
-        ['LOAD_ARMY',        'LOAD ARMY'],
-        ['DELAY',            'DELAY'],
-        ['COLLECTIBLES',     'COLLECT COLLECTIBLES'],
-        ['FILL_AND_RETURN',  'FILL GENERALS \u2192 STAR'],
-        ['CLAIM_QUESTS',     'COMPLETE QUEST'],
-        ['RETURN_HOME',      'RETURN TO ISLAND']
+        ['MOVE',                       'MOVE \u2192 garrison'],
+        ['ATTACK',                     'ATTACK \u00d7 building'],
+        ['TRANSFER_TO_ENEMY_GARRISON', 'TRANSFER \u2192 near enemy'],
+        ['WAIT_ZONE',                  'WAIT \u2014 arrives on island'],
+        ['WAIT_AT_GARRISON',           'WAIT \u2014 ready at garrison'],
+        ['WAIT_ATTACKING',             'WAIT \u2014 leaves garrison'],
+        ['WAIT_GARRISON',              'WAIT \u2014 reaches position'],
+        ['WAIT_IDLE',                  'WAIT \u2014 finishes task'],
+        ['UNLOAD',                     'UNLOAD army'],
+        ['LOAD_ARMY',                  'LOAD ARMY'],
+        ['DELAY',                      'DELAY'],
+        ['COLLECTIBLES',               'COLLECT COLLECTIBLES'],
+        ['FILL_AND_RETURN',            'FILL GENERALS \u2192 STAR'],
+        ['CLAIM_QUESTS',               'COMPLETE QUEST'],
+        ['COLLECT_ALL_QUESTS',         'COLLECT ALL + QUESTS'],
+        ['RETURN_HOME',                'RETURN TO ISLAND']
     ];
     ALL_TYPES.forEach(function (pair) {
         $('<option>').val(pair[0]).text(pair[1]).prop('selected', bsStep.type === pair[0]).appendTo($typeSel);
@@ -2092,8 +2120,8 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
 
     // Building selector
     if (needsBuilding) {
-        // For ATTACK steps: show ALL buildings (including defeated) so we never lose the reference
-        var isAttackStep = bsStep.type === 'ATTACK';
+        // For ATTACK/TRANSFER steps: show ALL buildings (including defeated) so we never lose the reference
+        var isAttackStep = bsStep.type === 'ATTACK' || bsStep.type === 'TRANSFER_TO_ENEMY_GARRISON';
         var buildings = _qrBsGetBuildings(); // alive intercept buildings
         var allBuildings = [];
         if (isAttackStep) {
@@ -2235,6 +2263,134 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         });
 
         $row.append($bldSel);
+    }
+
+    // Target cell scan UI (TRANSFER_TO_ENEMY_GARRISON only)
+    if (bsStep.type === 'TRANSFER_TO_ENEMY_GARRISON') {
+        var $tfeWrap = $('<div>').css({
+            'display': 'flex', 'flex-wrap': 'nowrap', 'gap': '4px',
+            'margin-top': '4px', 'width': '100%', 'flex-basis': '100%', 'align-items': 'center'
+        });
+
+        var $tfeGridSel = $('<select>').attr('class', 'form-control input-xs qrBsTargetGridSel')
+            .css({ 'flex': '1', 'font-size': '11px', 'min-width': '140px' });
+
+        // Pre-populate from saved step data
+        if (bsStep.targetGrid && bsStep.targetGrid > 0) {
+            $('<option>').val(bsStep.targetGrid)
+                .text('grid:' + bsStep.targetGrid + ' (saved)')
+                .prop('selected', true).appendTo($tfeGridSel);
+            $row.attr('data-target-grid', bsStep.targetGrid);
+        } else {
+            $('<option>').val('').text('\u2014 click Scan \u2014').appendTo($tfeGridSel);
+        }
+
+        $tfeGridSel.on('change', function () {
+            $row.attr('data-target-grid', $(this).val() || '');
+        });
+
+        var $scanBtn = $('<button>').text('Scan cells').attr('class', 'btn btn-xs btn-default')
+            .css({ 'flex-shrink': '0', 'font-size': '10px', 'white-space': 'nowrap' });
+
+        $scanBtn.on('click', function () {
+            $tfeGridSel.empty();
+            $('<option>').val('').text('scanning\u2026').appendTo($tfeGridSel);
+
+            var bldKey  = $row.find('.qrBsBldSel').val() || $row.attr('data-bld-key') || '';
+            var bldGrid = _qrBsGetBuildingGrid(bldKey, bldKey);
+            if (!bldGrid) {
+                $tfeGridSel.empty();
+                $('<option>').val('').text('\u2014 building not found in zone \u2014').appendTo($tfeGridSel);
+                return;
+            }
+
+            // Resolve map width
+            var scanW = 0;
+            try { scanW = game.zone.mStreetDataMap.mWidth    || 0; } catch (e) {}
+            if (!scanW) { try { scanW = game.zone.mStreetDataMap.mMapWidth || 0; } catch (e) {} }
+            if (!scanW) { try { scanW = game.zone.mStreetDataMap.mNumCols  || 0; } catch (e) {} }
+            if (!scanW) { scanW = 120; }
+
+            var scanERow = Math.floor(bldGrid / scanW);
+            var scanECol = bldGrid % scanW;
+
+            // Detect blocking-check method
+            var scanMethod = 'none';
+            var scanBG = null;
+            try { scanBG = game.zone.mStreetDataMap.mBlockingGrid; if (scanBG && scanBG.length > 0) { scanMethod = 'mBlockingGrid[' + scanBG.length + ']'; } } catch (e) {}
+            if (scanMethod === 'none') {
+                try {
+                    var sdm = game.zone.mStreetDataMap;
+                    var fns = ['GetIsBlocking', 'IsBlocking', 'isBlocking', 'GetBlocking'];
+                    for (var fi = 0; fi < fns.length; fi++) {
+                        if (typeof sdm[fns[fi]] === 'function') { scanMethod = fns[fi] + '()'; break; }
+                    }
+                } catch (e) {}
+            }
+            if (scanMethod === 'none') { scanMethod = 'building-only'; }
+
+            function scanCellFree(g) {
+                if (scanBG && scanBG.length > g) { return scanBG[g] === 0; }
+                try {
+                    var sdm2 = game.zone.mStreetDataMap;
+                    var fns2 = ['GetIsBlocking', 'IsBlocking', 'isBlocking', 'GetBlocking'];
+                    for (var fi2 = 0; fi2 < fns2.length; fi2++) {
+                        if (typeof sdm2[fns2[fi2]] === 'function') { return !sdm2[fns2[fi2]](g); }
+                    }
+                } catch (e) {}
+                try { return !game.zone.GetBuildingFromGridPosition(g); } catch (e) {}
+                return true;
+            }
+
+            $tfeGridSel.empty();
+            $('<option>').val('').text('\u2014 select a cell \u2014').appendTo($tfeGridSel);
+
+            game.chatMessage('SCAN: enemy grid=' + bldGrid + ' mapW=' + scanW + ' row=' + scanERow + ' col=' + scanECol + ' method=' + scanMethod, 'adventurer');
+
+            // Scan a square radius around the enemy building, sorted by distance
+            var SCAN_RADIUS = 6;
+            var scanResults = [];
+            for (var dr = -SCAN_RADIUS; dr <= SCAN_RADIUS; dr++) {
+                for (var dc = -SCAN_RADIUS; dc <= SCAN_RADIUS; dc++) {
+                    if (dr === 0 && dc === 0) { continue; } // skip the enemy cell itself
+                    var sr = scanERow + dr, sc = scanECol + dc;
+                    if (sr < 0 || sc < 0 || sc >= scanW) { continue; }
+                    var cand = sr * scanW + sc;
+                    if (scanCellFree(cand)) {
+                        scanResults.push({ grid: cand, row: sr, col: sc, dist: Math.abs(dr) + Math.abs(dc) });
+                    }
+                }
+            }
+            scanResults.sort(function (a, b) { return a.dist - b.dist; });
+
+            // Show up to 30 closest free cells
+            var scanShown = Math.min(scanResults.length, 30);
+            for (var si = 0; si < scanShown; si++) {
+                var sr2 = scanResults[si];
+                $('<option>').val(sr2.grid)
+                    .text('grid:' + sr2.grid + '  (r' + sr2.row + ' c' + sr2.col + ')  d=' + sr2.dist)
+                    .appendTo($tfeGridSel);
+            }
+            if (scanResults.length === 0) {
+                $('<option>').val('').text('no free cells found nearby').appendTo($tfeGridSel);
+            }
+            game.chatMessage('SCAN: found ' + scanResults.length + ' free cells (showing ' + scanShown + ')', 'adventurer');
+        });
+
+        // "Show" button — scrolls the map to the currently selected grid
+        var $showBtn = $('<button>').text('\uD83D\uDCCD').attr('class', 'btn btn-xs btn-default')
+            .css({ 'flex-shrink': '0', 'font-size': '12px', 'padding': '2px 6px' })
+            .attr('title', 'Scroll map to selected cell');
+        $showBtn.on('click', function () {
+            var showGrid = parseInt($tfeGridSel.val(), 10);
+            if (showGrid > 0) {
+                try { game.zone.ScrollToGrid(showGrid); } catch (e) {}
+                game.chatMessage('Showing grid:' + showGrid + ' on map', 'adventurer');
+            }
+        });
+
+        $tfeWrap.append($scanBtn).append($tfeGridSel).append($showBtn);
+        $row.append($tfeWrap);
     }
 
     // Minimum army check editor (ATTACK steps)
@@ -2444,15 +2600,18 @@ function _qrBsUpdateStepProgress(idx, steps) {
         WAIT_IDLE: 'WAIT \u2014 idle',        UNLOAD: 'UNLOAD army',
         LOAD_ARMY: 'LOAD ARMY',               DELAY: 'DELAY',
         COLLECTIBLES: 'COLLECT',              FILL_AND_RETURN: 'FILL \u2192 STAR',
-        CLAIM_QUESTS: 'CLAIM QUEST REWARDS'
+        CLAIM_QUESTS: 'CLAIM QUEST REWARDS',  TRANSFER_TO_ENEMY_GARRISON: 'TRANSFER \u2192 near enemy'
     };
     function fmt(i) {
         if (i < 0 || i >= steps.length) { return null; }
         var s = steps[i];
         var text = (i + 1) + '. ' + (TYPE_LABEL[s.type] || s.type);
         if (s.generalName) { text += ' \u2014 ' + s.generalName; }
-        if (s.buildingDisplay && (s.type === 'MOVE' || s.type === 'ATTACK' || s.type === 'WAIT_GARRISON')) {
+        if (s.buildingDisplay && (s.type === 'MOVE' || s.type === 'ATTACK' || s.type === 'WAIT_GARRISON' || s.type === 'TRANSFER_TO_ENEMY_GARRISON')) {
             text += ' @ ' + s.buildingDisplay;
+        }
+        if (s.type === 'TRANSFER_TO_ENEMY_GARRISON' && s.targetGrid) {
+            text += ' (grid:' + s.targetGrid + ')';
         }
         if (s.type === 'DELAY') { text += ' (' + (s.seconds || 5) + 's)'; }
         return text;
@@ -2583,6 +2742,58 @@ function _qrRunBattleScript(startIdx) {
                                     setTimeout(runNextStep, 1000);
                                 }
                             } catch (e) { clearInterval(ivM); finish('MOVE error: ' + e); }
+                        }, 2000);
+                    }, 2000);
+                    break;
+                }
+
+                case 'TRANSFER_TO_ENEMY_GARRISON': {
+                    if (!spec) { game.chatMessage('TRANSFER: general not found — skipping.', 'adventurer'); runNextStep(); return; }
+
+                    var tfeTargetGrid = (step.targetGrid && step.targetGrid > 0) ? step.targetGrid : 0;
+                    if (!tfeTargetGrid) {
+                        game.chatMessage('TRANSFER: no target grid set — use Scan in the editor first. Skipping.', 'adventurer');
+                        setTimeout(runNextStep, 1000); break;
+                    }
+
+                    game.chatMessage('TRANSFER: target grid:' + tfeTargetGrid, 'adventurer');
+
+                    var tfeGenUID  = step.generalUID;
+                    var tfeGenName = genName;
+
+                    // Already there?
+                    if (spec.GetGarrisonGridIdx && spec.GetGarrisonGridIdx() === tfeTargetGrid) {
+                        game.chatMessage('TRANSFER: ' + tfeGenName + ' already at grid:' + tfeTargetGrid + ' — skipping.', 'adventurer');
+                        setTimeout(runNextStep, 1000); break;
+                    }
+
+                    var tfeOrigGrid = spec.GetGarrisonGridIdx ? spec.GetGarrisonGridIdx() : 0;
+                    var tfeStask = new armySpecTaskDef();
+                    tfeStask.uniqueID  = spec.GetUniqueID();
+                    tfeStask.subTaskID = 0;
+                    game.gi.mCurrentCursor.mCurrentSpecialist = spec;
+                    game.gi.SendServerAction(95, 4, tfeTargetGrid, 0, tfeStask);
+                    game.chatMessage('TRANSFER: ' + tfeGenName + ' \u2192 grid:' + tfeTargetGrid + ' near "' + (step.buildingDisplay || step.buildingKey || '') + '"', 'adventurer');
+
+                    // Poll until general has left original position
+                    setTimeout(function () {
+                        var ivTfeTick = 0;
+                        var ivTfe = setInterval(function () {
+                            if (state.stopped) { clearInterval(ivTfe); return; }
+                            ivTfeTick++;
+                            if (ivTfeTick > 15) {
+                                clearInterval(ivTfe);
+                                game.chatMessage('TRANSFER: timeout — ' + tfeGenName + ' did not move (cell may be blocked).', 'adventurer');
+                                setTimeout(runNextStep, 1000); return;
+                            }
+                            try {
+                                var s = _qrFindSpecByUID(tfeGenUID);
+                                if (s && s.GetGarrisonGridIdx() !== tfeOrigGrid) {
+                                    clearInterval(ivTfe);
+                                    game.chatMessage('TRANSFER: ' + tfeGenName + ' is moving to position.', 'adventurer');
+                                    setTimeout(runNextStep, 1000);
+                                }
+                            } catch (e) { clearInterval(ivTfe); finish('TRANSFER error: ' + e); }
                         }, 2000);
                     }, 2000);
                     break;
@@ -3279,6 +3490,147 @@ function _qrRunBattleScript(startIdx) {
                         game.chatMessage('CLAIM_QUESTS error: ' + e, 'adventurer');
                         setTimeout(runNextStep, 1000);
                     }
+                    break;
+                }
+
+                case 'COLLECT_ALL_QUESTS': {
+                    // Loop: collect collectibles → wait 20s → claim quests → wait 20s → recheck until nothing left
+                    var caqWait = 20000; // 20 seconds between phases
+                    var caqPass = 0;
+
+                    function caqCountCollectibles() {
+                        var count = 0;
+                        try {
+                            var cMgr = swmmo.getDefinitionByName('Collections::CollectionsManager').getInstance();
+                            var qtMap = {};
+                            if (game.gi.mCurrentPlayer.mIsAdventureZone && game.gi.mNewQuestManager.GetQuestPool().IsAnyQuestsActive()) {
+                                $.each(game.gi.mNewQuestManager.GetQuestPool().GetQuest_vector(), function (i, q) {
+                                    if (q.isFinished() || !q.IsQuestActive()) { return; }
+                                    $.each(q.mQuestDefinition.questTriggers_vector, function (n, trig) {
+                                        if (trig.name_string) { qtMap[trig.name_string] = true; }
+                                    });
+                                });
+                            }
+                            game.gi.mCurrentPlayerZone.mStreetDataMap.GetBuildings_vector().forEach(function (b) {
+                                if (!b) { return; }
+                                var goc = b.GetGOContainer();
+                                if (
+                                    cMgr.getBuildingIsCollectible(b.GetBuildingName_string()) ||
+                                    (qtMap[b.GetBuildingName_string()] && b.mIsSelectable &&
+                                     goc.mIsAttackable && !goc.mIsLeaderCamp && goc.ui !== 'enemy' &&
+                                     (b.GetArmy() == null || !b.GetArmy().HasUnits()))
+                                ) { count++; }
+                            });
+                        } catch (e) {}
+                        return count;
+                    }
+
+                    function caqCollectAll(done) {
+                        try {
+                            var cMgr = swmmo.getDefinitionByName('Collections::CollectionsManager').getInstance();
+                            var cq = new TimedQueue(1000);
+                            var qtMap = {};
+                            if (game.gi.mCurrentPlayer.mIsAdventureZone && game.gi.mNewQuestManager.GetQuestPool().IsAnyQuestsActive()) {
+                                $.each(game.gi.mNewQuestManager.GetQuestPool().GetQuest_vector(), function (i, q) {
+                                    if (q.isFinished() || !q.IsQuestActive()) { return; }
+                                    $.each(q.mQuestDefinition.questTriggers_vector, function (n, trig) {
+                                        if (trig.name_string) { qtMap[trig.name_string] = true; }
+                                    });
+                                });
+                            }
+                            game.gi.mCurrentPlayerZone.mStreetDataMap.GetBuildings_vector().forEach(function (b) {
+                                if (!b) { return; }
+                                var goc = b.GetGOContainer();
+                                if (
+                                    cMgr.getBuildingIsCollectible(b.GetBuildingName_string()) ||
+                                    (qtMap[b.GetBuildingName_string()] && b.mIsSelectable &&
+                                     goc.mIsAttackable && !goc.mIsLeaderCamp && goc.ui !== 'enemy' &&
+                                     (b.GetArmy() == null || !b.GetArmy().HasUnits()))
+                                ) { cq.add(function () { game.gi.SelectBuilding(b); }); }
+                            });
+                            if (cq.len() === 0) { done(); return; }
+                            game.chatMessage('COLLECT_ALL: collecting ' + cq.len() + ' collectible(s)\u2026', 'adventurer');
+                            cq.add(function () { done(); });
+                            cq.run();
+                        } catch (e) { done(); }
+                    }
+
+                    function caqCountFinished() {
+                        var cnt = 0;
+                        try {
+                            $.each(game.gi.mNewQuestManager.GetQuestPool().GetQuest_vector(), function (i, q) {
+                                try { if (q && q.isFinished && q.isFinished()) { cnt++; } } catch (e) {}
+                            });
+                        } catch (e) {}
+                        return cnt;
+                    }
+
+                    function caqClaimAll(done) {
+                        if (typeof qlAutoClaimAll === 'function') {
+                            _qrMinimizeModal();
+                            qlAutoClaimAll(function (claimed) {
+                                _qrRestoreModal();
+                                game.chatMessage('COLLECT_ALL: auto-claimed ' + claimed + ' quest(s).', 'adventurer');
+                                done();
+                            });
+                        } else {
+                            game.chatMessage('COLLECT_ALL: no auto-claim available \u2014 skipping quests.', 'adventurer');
+                            done();
+                        }
+                    }
+
+                    function caqLoop() {
+                        if (state.stopped || _qrBsStopFlag) { state.stopped = true; return; }
+                        caqPass++;
+                        if (caqPass > 20) {
+                            game.chatMessage('COLLECT_ALL: safety limit (20 passes) \u2014 moving on.', 'adventurer');
+                            setTimeout(runNextStep, 1000);
+                            return;
+                        }
+
+                        var cCount = caqCountCollectibles();
+                        if (cCount > 0) {
+                            game.chatMessage('COLLECT_ALL: pass ' + caqPass + ' \u2014 ' + cCount + ' collectible(s) pending\u2026', 'adventurer');
+                            caqCollectAll(function () {
+                                if (state.stopped) { return; }
+                                game.chatMessage('COLLECT_ALL: waiting 20s for collectibles to register\u2026', 'adventurer');
+                                setTimeout(function () {
+                                    if (state.stopped) { return; }
+                                    // After collecting, check quests
+                                    var fCount = caqCountFinished();
+                                    if (fCount > 0) {
+                                        game.chatMessage('COLLECT_ALL: ' + fCount + ' finished quest(s) \u2014 claiming\u2026', 'adventurer');
+                                        caqClaimAll(function () {
+                                            if (state.stopped) { return; }
+                                            game.chatMessage('COLLECT_ALL: waiting 20s after quest claim\u2026', 'adventurer');
+                                            setTimeout(caqLoop, caqWait);
+                                        });
+                                    } else {
+                                        setTimeout(caqLoop, caqWait);
+                                    }
+                                }, caqWait);
+                            });
+                            return;
+                        }
+
+                        var fCount = caqCountFinished();
+                        if (fCount > 0) {
+                            game.chatMessage('COLLECT_ALL: pass ' + caqPass + ' \u2014 ' + fCount + ' finished quest(s) pending\u2026', 'adventurer');
+                            caqClaimAll(function () {
+                                if (state.stopped) { return; }
+                                game.chatMessage('COLLECT_ALL: waiting 20s after quest claim\u2026', 'adventurer');
+                                setTimeout(caqLoop, caqWait);
+                            });
+                            return;
+                        }
+
+                        // Nothing left
+                        game.chatMessage('COLLECT_ALL: all collectibles and quests cleared (pass ' + caqPass + ').', 'adventurer');
+                        setTimeout(runNextStep, 1000);
+                    }
+
+                    game.chatMessage('COLLECT_ALL: starting collect + quest loop\u2026', 'adventurer');
+                    caqLoop();
                     break;
                 }
 
