@@ -109,6 +109,9 @@ var _qrBattleFlowCollapsed = false;  // collapsed state for Battle Flow section
 var _qrScrollToBsIdx       = -1;    // battle-script step index to scroll to after render (-1 = no scroll)
 var _qrScrollToGenIdx      = -1;    // generals step index to scroll to after render (-1 = no scroll)
 var _qrBsStopFlag          = false; // global stop flag — backup for state.stopped
+var _qrBsRepeat            = false; // repeat adventure after all steps complete
+var _qrRepeatIntervalId    = null;  // setInterval handle for the repeat-wait poll
+var _qrRepeatStatus        = null;  // status string shown in minimized panel during repeat wait
 
 // ---- Modal minimize/restore ----
 function _qrMinimizeModal() {
@@ -1582,6 +1585,41 @@ function _qrRun() {
         }, 2000);
     }
 
+    // ── PHASE 0: unload ALL generals currently on home island to free the full unit pool ──
+    function doUnloadAllIslandThen(callback) {
+        var allSpecs = [];
+        try {
+            game.gi.mCurrentPlayerZone.GetSpecialists_vector().forEach(function (s) {
+                try { if (s && s.HasUnits && s.HasUnits()) { allSpecs.push(s); } } catch (e) {}
+            });
+        } catch (e) {}
+        if (allSpecs.length === 0) {
+            game.chatMessage('Adventurer: no generals with units on home island \u2014 nothing to unload.', 'adventurer');
+            callback();
+            return;
+        }
+        game.chatMessage('Adventurer: unloading ' + allSpecs.length + ' general(s) on home island\u2026', 'adventurer');
+        allSpecs.forEach(function (spec) {
+            try {
+                var vo = new dRaiseArmyVODef();
+                vo.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
+                game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, vo, armyResponder);
+            } catch (e) {}
+        });
+        var uTicks = 0;
+        var ivU = setInterval(function () {
+            uTicks++;
+            var allEmpty = allSpecs.every(function (s) {
+                try { return !s.HasUnits || !s.HasUnits(); } catch (e) { return true; }
+            });
+            if (allEmpty || uTicks > 15) {
+                clearInterval(ivU);
+                game.chatMessage('Adventurer: all island generals unloaded \u2713', 'adventurer');
+                callback();
+            }
+        }, 2000);
+    }
+
     // ── PHASE 1: for each general with stepMinArmy configured, do: unload → load → poll confirm ──
     // stepMinArmy (left "in Army for General" column) is the army to load at dispatch.
     // Generals are processed ONE AT A TIME before any dispatch happens.
@@ -1590,8 +1628,8 @@ function _qrRun() {
     });
 
     if (stepsWithArmy.length === 0) {
-        game.chatMessage('Adventurer: no dispatch armies configured \u2014 skipping army load\u2026', 'adventurer');
-        doPlaceAndWaitZone();
+        game.chatMessage('Adventurer: no dispatch armies configured \u2014 unloading island generals then placing adventure\u2026', 'adventurer');
+        doUnloadAllIslandThen(doPlaceAndWaitZone);
         return;
     }
 
@@ -1727,26 +1765,8 @@ function _qrRun() {
         }
     }
 
-    // Unload ALL generals referenced in the profile first, so the unit pool is fully free
-    // before we start assigning specific armies to each general one by one.
-    var allProfileSpecs = [];
-    var _seenUnloadUIDs = {};
-    profile.steps.forEach(function (s) {
-        if (!s.generalUID || _seenUnloadUIDs[s.generalUID]) { return; }
-        _seenUnloadUIDs[s.generalUID] = true;
-        var sp = _qrFindSpecByUID(s.generalUID);
-        if (sp) { allProfileSpecs.push(sp); }
-    });
-
-    if (allProfileSpecs.length > 0) {
-        game.chatMessage('Adventurer: unloading all ' + allProfileSpecs.length + ' general(s) to free unit pool\u2026', 'adventurer');
-        _qrUtils.unloadAll(allProfileSpecs, function () {
-            game.chatMessage('Adventurer: all generals unloaded \u2713', 'adventurer');
-            doLoadNextGeneral();
-        });
-    } else {
-        doLoadNextGeneral();
-    }
+    // ── PHASE 0 → PHASE 1: unload ALL island generals first, then load profile armies one by one ──
+    doUnloadAllIslandThen(doLoadNextGeneral);
 }
 
 // ============================================================
@@ -1983,6 +2003,14 @@ function _qrRenderBattleScript($ed, profile) {
     $('<button>').attr({ 'class': 'btn btn-xs btn-default', 'id': 'qrBsRestartBtn', 'style': 'display:none' })
         .text('\u21ba Restart')
         .click(function () { _qrBsState = null; _qrRunBattleScript(0); }).appendTo($hdr);
+    var $repeatLabel = $('<label>').css({ 'display': 'inline-flex', 'align-items': 'center', 'gap': '4px',
+        'margin-left': '10px', 'font-size': '12px', 'cursor': 'pointer', 'color': '#ccc',
+        'vertical-align': 'middle', 'line-height': '1', 'user-select': 'none' });
+    $('<input>').attr({ 'type': 'checkbox', 'id': 'qrBsRepeatChk' }).prop('checked', _qrBsRepeat)
+        .on('change', function () { _qrBsRepeat = $(this).is(':checked'); })
+        .appendTo($repeatLabel);
+    $repeatLabel.append('\u00a0\ud83d\udd01 Repeat adventure');
+    $hdr.append($repeatLabel);
     _qrBsUpdateControls();
     $wrap.append($hdr);
 
@@ -2612,10 +2640,16 @@ function _qrBsUpdateControls() {
     $('#qrBsStopBtnFtr').toggle(!!(running || paused));
     $('#qrBsContinueBtnFtr').toggle(!!paused);
     $('#qrBsRestartBtnFtr').toggle(!!paused);
-    // Step progress panel — only while minimized and script active
-    var showProgress = minimized && !!(running || paused) && _qrBsState && _qrBsState.steps;
+    // Step progress panel — shown while minimized and script active, OR while repeat is waiting
+    var showProgress = minimized && (!!(running || paused) && _qrBsState && _qrBsState.steps || !!_qrRepeatStatus);
     $('#qrBsStepProgress').toggle(!!showProgress);
-    if (showProgress && _qrBsState.activeIdx !== undefined) {
+    if (_qrRepeatStatus) {
+        var $rp = $('#qrBsStepProgress').empty();
+        $('<div>').css({ 'color': '#f0c040', 'font-size': '12px', 'font-weight': 'bold',
+                         'white-space': 'nowrap', 'overflow': 'hidden', 'text-overflow': 'ellipsis',
+                         'padding': '2px 0' })
+            .text(_qrRepeatStatus).appendTo($rp);
+    } else if (showProgress && _qrBsState && _qrBsState.activeIdx !== undefined) {
         _qrBsUpdateStepProgress(_qrBsState.activeIdx, _qrBsState.steps);
     }
 }
@@ -2686,6 +2720,7 @@ function _qrRunBattleScript(startIdx) {
 
     startIdx = startIdx || 0;
     _qrBsStopFlag = false;
+    if (_qrRepeatIntervalId) { clearInterval(_qrRepeatIntervalId); _qrRepeatIntervalId = null; }
     _qrBsState = { steps: profile.battleScript.slice(), stepIdx: startIdx, stopped: false, profile: profile };
     _qrRunning = true;
     _qrModal.withFooter('.qrRunBtn').prop('disabled', true);
@@ -2718,8 +2753,54 @@ function _qrRunBattleScript(startIdx) {
         if (state.stopped || _qrBsStopFlag) { state.stopped = true; return; }
         if (state.stepIdx >= state.steps.length) {
             $('#qrBsSteps .qrBsStep').css('outline', '');
-            finish('All steps complete.');
-            showGameAlert('Battle Script complete!');
+            if (!_qrBsRepeat) {
+                finish('All steps complete.');
+                showGameAlert('Battle Script complete!');
+                return;
+            }
+            // ── Repeat mode ── wait for all generals to be idle on home island, then restart
+            finish('All steps complete. Repeat: waiting for generals to return home\u2026');
+            var rpUIDs = [], rpSeen = {};
+            (state.steps || []).forEach(function (s) {
+                if (s.generalUID && !rpSeen[s.generalUID]) { rpSeen[s.generalUID] = true; rpUIDs.push(s.generalUID); }
+            });
+            function rpIdleStatus() {
+                var total = rpUIDs.length, ready = 0;
+                rpUIDs.forEach(function (uid) {
+                    var s = _qrFindSpecByUID(uid);
+                    if (s && s.GetTask && s.GetTask() == null) { ready++; }
+                });
+                return { total: total, ready: ready };
+            }
+            _qrRepeatStatus = '\uD83D\uDD01 Repeat: waiting for generals to return home\u2026';
+            _qrBsUpdateControls();
+            var rpTick = 0;
+            _qrRepeatIntervalId = setInterval(function () {
+                if (!_qrBsRepeat) {
+                    clearInterval(_qrRepeatIntervalId); _qrRepeatIntervalId = null;
+                    _qrRepeatStatus = null;
+                    _qrBsUpdateControls();
+                    game.chatMessage('BattleScript: repeat cancelled \u2014 done.', 'adventurer');
+                    return;
+                }
+                rpTick++;
+                var elapsed = Math.round(rpTick * 5 / 60);
+                var st = rpIdleStatus();
+                if (st.ready >= st.total) {
+                    clearInterval(_qrRepeatIntervalId); _qrRepeatIntervalId = null;
+                    _qrRepeatStatus = null;
+                    _qrBsUpdateControls();
+                    game.chatMessage('BattleScript: generals home \u2014 starting next run\u2026', 'adventurer');
+                    _qrRun();
+                } else {
+                    _qrRepeatStatus = '\uD83D\uDD01 Repeat: ' + st.ready + '/' + st.total + ' generals home' +
+                        (elapsed > 0 ? ' (' + elapsed + 'min)' : '') + '\u2026';
+                    _qrBsUpdateControls();
+                    if (rpTick % 12 === 0) {
+                        game.chatMessage('BattleScript: repeat \u2014 ' + st.ready + '/' + st.total + ' generals home (' + elapsed + 'min)\u2026', 'adventurer');
+                    }
+                }
+            }, 5000);
             return;
         }
         setActiveRow(state.stepIdx);
