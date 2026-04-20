@@ -550,6 +550,9 @@ function _qrSortTypes(types) {
 // ---- Menu ----
 try {
     addToolsMenuItem(_qrT('title'), _qrOpenModal);
+    addToolsMenuItem('🔍 Start Msg Intercept', _qrStartMsgIntercept);
+    addToolsMenuItem('🛑 Stop Msg Intercept', _qrStopMsgIntercept);
+    addToolsMenuItem('📋 Dump Adventure API', _qrDumpAdventureAPI);
 } catch (e) { }
 
 // ---- Modal open ----
@@ -793,34 +796,226 @@ function _qrDescribeFlashObj(obj, label) {
 // ---- Dump adventure-related API info to chat ----
 function _qrDumpAdventureAPI() {
     var out = [];
+
+    // 1. AdventureManager — the core adventure class
     try {
         var AdvManager = swmmo.getDefinitionByName("com.bluebyte.tso.adventure.logic::AdventureManager").getInstance();
         out.push(_qrDescribeFlashObj(AdvManager, 'AdventureManager'));
-        // Dump one adventure item if available
+        // Dump adventure items + players collection
         var advs = AdvManager.getAdventures();
+        out.push('AdventureManager.getAdventures() count: ' + (advs ? advs.length : 0));
         if (advs && advs.length > 0) {
-            out.push(_qrDescribeFlashObj(advs[0], 'Adventure[0] (' + advs[0].adventureName + ')'));
+            for (var ai = 0; ai < advs.length; ai++) {
+                var adv = advs[ai];
+                out.push(_qrDescribeFlashObj(adv, 'Adventure[' + ai + '] (' + adv.adventureName + ')'));
+                // Dump property VALUES (not just types)
+                var advVals = ['=== Adventure[' + ai + '] values ==='];
+                var valKeys = ['adventureName','zoneID','ownerPlayerID','status','isLookingForHelp',
+                    'troopLimit','admiralCount','colonyStatus','mapLevel','totalDuration','rewardId',
+                    'collectedTime','isTrackedMission','isAssignedToTempSlot','colonyID',
+                    'colonyOwnerPlayerId','colonyPreviousOwnerId'];
+                valKeys.forEach(function(k) { try { advVals.push('  ' + k + ' = ' + adv[k]); } catch(e){} });
+                // Inspect players ArrayCollection
+                try {
+                    var pl = adv.players;
+                    advVals.push('  players.length = ' + (pl ? pl.length : 'null'));
+                    if (pl && pl.length > 0) {
+                        for (var pi = 0; pi < pl.length; pi++) {
+                            var p = pl.getItemAt ? pl.getItemAt(pi) : pl[pi];
+                            advVals.push('  player[' + pi + '] type: ' + typeof p);
+                            if (p) {
+                                out.push(_qrDescribeFlashObj(p, 'Adventure[' + ai + '].player[' + pi + ']'));
+                                // Dump player values
+                                var pVals = [];
+                                for (var pk in p) { try { pVals.push('    ' + pk + ' = ' + p[pk]); } catch(e){} }
+                                advVals.push(pVals.join('\n'));
+                            }
+                        }
+                    }
+                } catch (e) { advVals.push('  players error: ' + e); }
+                out.push(advVals.join('\n'));
+            }
         }
     } catch (e) { out.push('AdventureManager error: ' + e); }
-    // ServiceManager
+
+    // 2. describeType on game.gi (sealed class — for...in doesn't work!)
     try {
-        var svc = swmmo.getDefinitionByName("com.bluebyte.tso.service::ServiceManager").getInstance();
-        out.push(_qrDescribeFlashObj(svc, 'ServiceManager'));
-        // Check for adventure service
-        try { out.push(_qrDescribeFlashObj(svc.adventure, 'ServiceManager.adventure')); } catch (e) {}
-        try { out.push(_qrDescribeFlashObj(svc.coop, 'ServiceManager.coop')); } catch (e) {}
-    } catch (e) { out.push('ServiceManager error: ' + e); }
-    // ClientMessages
+        out.push(_qrDescribeFlashObj(game.gi, 'game.gi (describeType)'));
+    } catch (e) { out.push('game.gi describeType error: ' + e); }
+
+    // 3. describeType on globalFlash.gui (also sealed)
     try {
-        var cm = game.gi.mClientMessages;
-        out.push(_qrDescribeFlashObj(cm, 'mClientMessages'));
+        out.push(_qrDescribeFlashObj(globalFlash.gui, 'globalFlash.gui (describeType)'));
+    } catch (e) { out.push('globalFlash.gui describeType error: ' + e); }
+
+    // 4. mClientMessages — full introspection
+    try {
+        out.push(_qrDescribeFlashObj(game.gi.mClientMessages, 'mClientMessages'));
     } catch (e) { out.push('mClientMessages error: ' + e); }
-    // FriendsList - check for invite methods
+
+    // 5. Try known VO classes
+    var classesToTry = [
+        'Communication.VO::dAdventureVO',
+        'Communication.VO::dAdventureInviteVO',
+        'Communication.VO::dCoopInviteVO',
+        'Communication.VO::dInvitePlayerVO',
+        'Communication.VO::dInviteFriendVO',
+        'Communication.VO::dJoinAdventureVO',
+        'Communication.VO.UpdateVO::dAdventureClientInfoVO',
+        'AdventureSystem::cAdventureDefinition',
+        'com.bluebyte.tso.adventure.logic::CoopAdventureManager',
+        'Communication.VO::dAdventurePlayerVO'
+    ];
+    classesToTry.forEach(function (cls) {
+        try {
+            var clsDef = swmmo.getDefinitionByName(cls);
+            if (clsDef) {
+                var inst = null;
+                try { inst = clsDef.getInstance ? clsDef.getInstance() : new clsDef(); } catch (e) {}
+                if (inst) {
+                    out.push(_qrDescribeFlashObj(inst, cls + ' (instance)'));
+                } else {
+                    out.push(_qrDescribeFlashObj(clsDef, cls + ' (static)'));
+                }
+            } else {
+                out.push('NOT FOUND: ' + cls);
+            }
+        } catch (e) { out.push('NOT FOUND: ' + cls + ' (' + e + ')'); }
+    });
+
+    // 6. Read actual player values using describeType property names
     try {
-        var fl = globalFlash.gui.mFriendsList;
-        out.push(_qrDescribeFlashObj(fl, 'mFriendsList'));
-    } catch (e) { out.push('mFriendsList error: ' + e); }
-    // Write to file for easy reading
+        var AdvManager2 = swmmo.getDefinitionByName("com.bluebyte.tso.adventure.logic::AdventureManager").getInstance();
+        var advs2 = AdvManager2.getAdventures();
+        if (advs2 && advs2.length > 0) {
+            for (var ai2 = 0; ai2 < advs2.length; ai2++) {
+                var adv2 = advs2[ai2];
+                var pl2 = adv2.players;
+                if (pl2 && pl2.length > 0) {
+                    for (var pi2 = 0; pi2 < pl2.length; pi2++) {
+                        var p2 = pl2.getItemAt ? pl2.getItemAt(pi2) : pl2[pi2];
+                        if (p2) {
+                            var pVals = ['=== Adventure[' + ai2 + '].player[' + pi2 + '] VALUES ==='];
+                            // Read known properties directly (for...in won't work on sealed AS3)
+                            var pKeys = ['id','username','avatarId','status','playerLevel','friendSince',
+                                'onlineStatus','playerID','playerName','adventureID','avatarID','landingFieldID'];
+                            pKeys.forEach(function(k) {
+                                try { pVals.push('  ' + k + ' = ' + p2[k]); } catch(e){}
+                            });
+                            out.push(pVals.join('\n'));
+                        }
+                    }
+                }
+            }
+        }
+    } catch(e) { out.push('Player values error: ' + e); }
+
+    // 7. Brute-force VO class scanner — try all plausible Communication.VO names
+    var voNames = [
+        'dInvitePlayerVO', 'dInviteFriendVO', 'dInviteToAdventureVO', 'dAdventureInviteVO',
+        'dCoopInviteVO', 'dCoopVO', 'dJoinAdventureVO', 'dAdventureJoinVO',
+        'dSendInviteVO', 'dPlayerInvitationVO', 'dInvitationVO',
+        'dAdventurePlayerVO', 'dAdventureCoopVO', 'dSetLookingForHelpVO',
+        'dLookingForHelpVO', 'dAdventureRequestVO', 'dRequestHelpVO'
+    ];
+    var voNamespaces = ['Communication.VO', 'Communication.VO.UpdateVO'];
+    var voFound = ['=== VO class scanner ==='];
+    voNamespaces.forEach(function(ns) {
+        voNames.forEach(function(name) {
+            try {
+                var cls = swmmo.getDefinitionByName(ns + '::' + name);
+                if (cls) {
+                    voFound.push('FOUND: ' + ns + '::' + name);
+                    try {
+                        var inst = new cls();
+                        out.push(_qrDescribeFlashObj(inst, ns + '::' + name + ' (instance)'));
+                    } catch(e) { voFound.push('  cannot instantiate: ' + e); }
+                }
+            } catch(e) { /* not found */ }
+        });
+    });
+    // Also try game.def() which is used in existing code
+    voNames.forEach(function(name) {
+        ['Communication.VO::' + name, 'Communication.VO.UpdateVO::' + name].forEach(function(full) {
+            try {
+                var cls = game.def(full);
+                if (cls) {
+                    voFound.push('FOUND via game.def: ' + full);
+                    try {
+                        var inst = new cls();
+                        out.push(_qrDescribeFlashObj(inst, full + ' (game.def instance)'));
+                    } catch(e) { voFound.push('  cannot instantiate: ' + e); }
+                }
+            } catch(e) { /* not found */ }
+        });
+    });
+    out.push(voFound.join('\n'));
+
+    // 8. Deep introspect mAdventurePanel — the adventure UI panel
+    try {
+        var advPanel = globalFlash.gui.mAdventurePanel;
+        if (advPanel) {
+            out.push(_qrDescribeFlashObj(advPanel, 'mAdventurePanel'));
+            // Also check sub-objects on the panel
+            var xml = window.runtime.flash.utils.describeType(advPanel);
+            var parser = new DOMParser();
+            var doc = parser.parseFromString(xml, 'text/xml');
+            var vars = doc.firstChild.querySelectorAll('variable, accessor');
+            for (var vi = 0; vi < vars.length; vi++) {
+                var vn = vars[vi].getAttribute('name');
+                try {
+                    var sub = advPanel[vn];
+                    if (sub && typeof sub === 'object' && !/^m?_?(int|string|Number|Boolean|uint)/i.test(vars[vi].getAttribute('type'))) {
+                        out.push(_qrDescribeFlashObj(sub, 'mAdventurePanel.' + vn));
+                    }
+                } catch(e) {}
+            }
+        } else {
+            out.push('mAdventurePanel is null/undefined');
+        }
+    } catch(e) { out.push('mAdventurePanel error: ' + e); }
+
+    // 9. Deep introspect mQuestBook — quest book with adventure section
+    try {
+        var qb = globalFlash.gui.mQuestBook;
+        if (qb) {
+            out.push(_qrDescribeFlashObj(qb, 'mQuestBook'));
+        } else {
+            out.push('mQuestBook is null/undefined');
+        }
+    } catch(e) { out.push('mQuestBook error: ' + e); }
+
+    // 10. Check Notifier system — adventure notifications
+    try {
+        var notifierClasses = [
+            'Model::Notifier', 'Model.Notifiers::InputNotifier',
+            'Model::Notification', 'Model::Observer',
+            'com.bluebyte.tso.adventure.logic::AdventureNotification'
+        ];
+        notifierClasses.forEach(function(cls) {
+            try {
+                var def = swmmo.getDefinitionByName(cls);
+                if (def) {
+                    out.push(_qrDescribeFlashObj(def, cls + ' (static)'));
+                    try {
+                        var inst = new def();
+                        out.push(_qrDescribeFlashObj(inst, cls + ' (instance)'));
+                    } catch(e) {}
+                }
+            } catch(e) {}
+        });
+    } catch(e) {}
+
+    // 11. Check what the adventure context menu items are ("Player Invitations" button)
+    try {
+        var dContextItemVODef = swmmo.getDefinitionByName('Communication.VO::dContextItemVO');
+        if (dContextItemVODef) {
+            var ciInst = new dContextItemVODef();
+            out.push(_qrDescribeFlashObj(ciInst, 'dContextItemVO (instance)'));
+        }
+    } catch(e) {}
+
+    // Write to file
     var resultText = out.join('\n\n');
     try {
         var f = air.File.applicationStorageDirectory.resolvePath('adventure_api_dump.txt');
@@ -828,14 +1023,243 @@ function _qrDumpAdventureAPI() {
         fs.open(f, 'write');
         fs.writeUTFBytes(resultText);
         fs.close();
-        showGameAlert('API dump written to:\n' + f.nativePath + '\n\nFirst 500 chars:\n' + resultText.substring(0, 500));
+        game.chatMessage('API dump written to: ' + f.nativePath, 'adventurer');
+        showGameAlert('API dump written to:\n' + f.nativePath);
     } catch (e) {
-        showGameAlert('API dump (first 800 chars):\n' + resultText.substring(0, 800));
+        showGameAlert('API dump (first 1000 chars):\n' + resultText.substring(0, 1000));
     }
-    // Also log to chat
-    var chatLines = resultText.split('\n');
-    for (var i = 0; i < chatLines.length && i < 100; i++) {
-        game.chatMessage(chatLines[i], 'adventurer');
+}
+
+// ---- Intercept SendMessagetoServer to log all server messages ----
+var _qrMsgInterceptActive = false;
+var _qrInterceptedMessages = [];
+var _qrOrigSendMsg = null;
+var _qrOrigSendAction = null;
+
+function _qrStartMsgIntercept() {
+    if (_qrMsgInterceptActive) {
+        showGameAlert('Interceptor already active! Messages logged: ' + _qrInterceptedMessages.length);
+        return;
+    }
+    _qrInterceptedMessages = [];
+
+    // Save originals
+    _qrOrigSendMsg = game.gi.mClientMessages.SendMessagetoServer;
+    _qrOrigSendAction = game.gi.SendServerAction;
+
+    // Try to hook SendMessagetoServer
+    var hookWorked = false;
+    try {
+        var wrapSend = function(msgType, zoneId, dataObj, responder) {
+            var entry = { type: 'Message', msgType: msgType, zoneId: zoneId, time: Date.now() };
+            try {
+                if (dataObj) {
+                    entry.dataClass = '' + window.runtime.flash.utils.getQualifiedClassName(dataObj);
+                    entry.dataProps = {};
+                    for (var k in dataObj) { try { entry.dataProps[k] = '' + dataObj[k]; } catch(e){} }
+                }
+            } catch(e) { entry.dataError = '' + e; }
+            _qrInterceptedMessages.push(entry);
+            game.chatMessage('INTERCEPT MSG: type=' + msgType + ' zone=' + zoneId +
+                (entry.dataClass ? ' class=' + entry.dataClass : '') +
+                (entry.dataProps ? ' data=' + JSON.stringify(entry.dataProps) : ''), 'adventurer');
+            return _qrOrigSendMsg.call(game.gi.mClientMessages, msgType, zoneId, dataObj, responder);
+        };
+        game.gi.mClientMessages.SendMessagetoServer = wrapSend;
+        // Verify it actually stuck (sealed AS3 classes may silently reject)
+        hookWorked = (game.gi.mClientMessages.SendMessagetoServer === wrapSend);
+    } catch(e) {
+        game.chatMessage('SendMessagetoServer hook failed: ' + e, 'adventurer');
+    }
+
+    // Try to hook SendServerAction
+    var actionHookWorked = false;
+    try {
+        var wrapAction = function(actionId, p1, p2, p3, p4) {
+            var entry = { type: 'Action', actionId: actionId, p1: p1, p2: p2, p3: p3, time: Date.now() };
+            try { entry.p4 = '' + p4; } catch(e){}
+            _qrInterceptedMessages.push(entry);
+            game.chatMessage('INTERCEPT ACTION: id=' + actionId + ' p1=' + p1 + ' p2=' + p2 + ' p3=' + p3, 'adventurer');
+            return _qrOrigSendAction.call(game.gi, actionId, p1, p2, p3, p4);
+        };
+        game.gi.SendServerAction = wrapAction;
+        actionHookWorked = (game.gi.SendServerAction === wrapAction);
+    } catch(e) {
+        game.chatMessage('SendServerAction hook failed: ' + e, 'adventurer');
+    }
+
+    if (!hookWorked && !actionHookWorked) {
+        // Both hooks failed — sealed AS3 classes. Use polling fallback.
+        game.chatMessage('Direct hooks failed (sealed Flash classes). Starting polling mode.', 'adventurer');
+        _qrMsgInterceptActive = true;
+        _qrStartPollingIntercept();
+        showGameAlert('Hooks failed on sealed Flash classes.\nUsing POLLING mode instead.\n\nPerform the invite now, then click Stop Intercept.');
+        return;
+    }
+
+    _qrMsgInterceptActive = true;
+    var status = 'Interceptor STARTED.\n  SendMessage hook: ' + (hookWorked ? 'OK' : 'FAILED') +
+                 '\n  SendAction hook: ' + (actionHookWorked ? 'OK' : 'FAILED');
+    game.chatMessage(status, 'adventurer');
+    showGameAlert(status + '\n\nPerform the invite now, then click Stop Intercept.');
+}
+
+// ---- Polling fallback: snapshot adventure state before/after ----
+var _qrPollTimer = null;
+function _qrStartPollingIntercept() {
+    var snapshot = _qrSnapshotAdventureState();
+    _qrInterceptedMessages.push({ type: 'PollStart', snapshot: snapshot, time: Date.now() });
+    _qrPollTimer = setInterval(function() {
+        var current = _qrSnapshotAdventureState();
+        if (JSON.stringify(current) !== JSON.stringify(snapshot)) {
+            _qrInterceptedMessages.push({ type: 'PollChange', before: snapshot, after: current, time: Date.now() });
+            game.chatMessage('POLL: Adventure state changed!', 'adventurer');
+            snapshot = current;
+        }
+    }, 2000);
+}
+
+function _qrSnapshotAdventureState() {
+    var snap = {};
+    try {
+        var AdvManager = swmmo.getDefinitionByName("com.bluebyte.tso.adventure.logic::AdventureManager").getInstance();
+        var advs = AdvManager.getAdventures();
+        snap.count = advs ? advs.length : 0;
+        snap.adventures = [];
+        if (advs) {
+            for (var i = 0; i < advs.length; i++) {
+                var adv = advs[i];
+                var advSnap = {
+                    name: adv.adventureName, zone: adv.zoneID, owner: adv.ownerPlayerID,
+                    status: adv.status, isLookingForHelp: adv.isLookingForHelp
+                };
+                // Snapshot players
+                try {
+                    var pl = adv.players;
+                    advSnap.playerCount = pl ? pl.length : 0;
+                    advSnap.players = [];
+                    if (pl && pl.length > 0) {
+                        for (var p = 0; p < pl.length; p++) {
+                            var player = pl.getItemAt ? pl.getItemAt(p) : pl[p];
+                            var pSnap = {};
+                            for (var k in player) { try { pSnap[k] = '' + player[k]; } catch(e){} }
+                            advSnap.players.push(pSnap);
+                        }
+                    }
+                } catch(e) { advSnap.playersError = '' + e; }
+                snap.adventures.push(advSnap);
+            }
+        }
+    } catch(e) { snap.error = '' + e; }
+    return snap;
+}
+
+function _qrStopMsgIntercept() {
+    if (!_qrMsgInterceptActive) {
+        showGameAlert('Interceptor is not active.\n\nClick "Start Msg Intercept" from Tools menu first.');
+        return;
+    }
+    // Stop polling if active
+    if (_qrPollTimer) { clearInterval(_qrPollTimer); _qrPollTimer = null; }
+
+    // Restore original functions
+    try { game.gi.mClientMessages.SendMessagetoServer = _qrOrigSendMsg; } catch(e) {}
+    try { game.gi.SendServerAction = _qrOrigSendAction; } catch(e) {}
+    _qrMsgInterceptActive = false;
+
+    // Take final snapshot for polling mode
+    var finalSnap = _qrSnapshotAdventureState();
+    _qrInterceptedMessages.push({ type: 'PollEnd', snapshot: finalSnap, time: Date.now() });
+
+    var msg = 'Intercepted ' + _qrInterceptedMessages.length + ' entries:\n\n';
+    _qrInterceptedMessages.forEach(function(e, i) {
+        msg += '[' + i + '] ' + e.type + ': ';
+        if (e.type === 'Message') {
+            msg += 'msgType=' + e.msgType + ' zone=' + e.zoneId;
+            if (e.dataClass) msg += '\n    class: ' + e.dataClass;
+            if (e.dataProps) msg += '\n    data: ' + JSON.stringify(e.dataProps);
+        } else if (e.type === 'Action') {
+            msg += 'actionId=' + e.actionId + ' p1=' + e.p1 + ' p2=' + e.p2 + ' p3=' + e.p3 + ' p4=' + e.p4;
+        } else if (e.type === 'PollStart' || e.type === 'PollEnd') {
+            msg += JSON.stringify(e.snapshot, null, 2);
+        } else if (e.type === 'PollChange') {
+            msg += '\n  BEFORE: ' + JSON.stringify(e.before, null, 2) + '\n  AFTER: ' + JSON.stringify(e.after, null, 2);
+        }
+        msg += '\n';
+    });
+
+    // Write to file
+    try {
+        var f = air.File.applicationStorageDirectory.resolvePath('intercept_results.txt');
+        var fs = new air.FileStream();
+        fs.open(f, 'write');
+        fs.writeUTFBytes(msg);
+        fs.close();
+        game.chatMessage('Intercept results saved: ' + f.nativePath, 'adventurer');
+        showGameAlert('Interceptor stopped. ' + _qrInterceptedMessages.length + ' entries.\n\nSaved to: ' + f.nativePath);
+    } catch(e) {
+        showGameAlert('Intercept results:\n' + msg.substring(0, 1000));
+    }
+}
+
+// ---- Try to invite a friend to an adventure zone ----
+function _qrTryInviteFriend(friendId, friendName, zoneId, advKey) {
+    game.chatMessage('Adventurer: inviting ' + friendName + ' (id=' + friendId + ') to adventure zone ' + zoneId, 'adventurer');
+
+    // 1. Find the adventure VO from AdventureManager
+    var advVO = null;
+    try {
+        var AdvManager = swmmo.getDefinitionByName("com.bluebyte.tso.adventure.logic::AdventureManager").getInstance();
+        var advs = AdvManager.getAdventures();
+        if (advs) {
+            advs.forEach(function (adv) {
+                if (adv.zoneID === zoneId || adv.adventureName === advKey) { advVO = adv; }
+            });
+        }
+    } catch (e) {
+        game.chatMessage('Adventurer: error getting adventure: ' + e, 'adventurer');
+        return false;
+    }
+    if (!advVO) {
+        game.chatMessage('Adventurer: adventure not found for zone ' + zoneId + ' / key ' + advKey, 'adventurer');
+        return false;
+    }
+
+    // 2. Find the friend's original Flash dPlayerListItemVO from the friends list
+    var friendVO = null;
+    try {
+        var fl = globalFlash.gui.mFriendsList;
+        var friends = fl.GetFilteredFriends('', true) || [];
+        friends.forEach(function (f) {
+            if (f && (f.id === friendId || f.username === friendName)) { friendVO = f; }
+        });
+        if (!friendVO) {
+            // Check guild members too
+            var members = fl.GetFilteredGuildMembers ? fl.GetFilteredGuildMembers('', true) : [];
+            if (!members || !members.length) { members = fl.GetGuildMembers ? fl.GetGuildMembers() : []; }
+            (members || []).forEach(function (m) {
+                if (m && (m.id === friendId || m.username === friendName)) { friendVO = m; }
+            });
+        }
+    } catch (e) {
+        game.chatMessage('Adventurer: error getting friend VO: ' + e, 'adventurer');
+        return false;
+    }
+    if (!friendVO) {
+        game.chatMessage('Adventurer: friend "' + friendName + '" not found in friends/guild list.', 'adventurer');
+        return false;
+    }
+
+    // 3. Set adventure data on the panel and invite
+    try {
+        var panel = globalFlash.gui.mAdventurePanel;
+        panel.SetData(advVO);
+        panel.AddInvitedPlayer(friendVO);
+        game.chatMessage('Adventurer: invitation sent to ' + friendName + '!', 'adventurer');
+        return true;
+    } catch (e) {
+        game.chatMessage('Adventurer: AddInvitedPlayer error: ' + e, 'adventurer');
+        return false;
     }
 }
 
@@ -1039,9 +1463,15 @@ function _qrRenderEditor() {
         });
 
         // ---- Co-op debug / API discovery buttons ----
-        var $coopDebugRow = $('<div>').css({ 'display': 'flex', 'gap': '8px', 'margin-top': '8px' });
-        $('<button>').attr({ 'class': 'btn btn-xs btn-info' }).text('Dump Adventure API')
+        var $coopDebugRow = $('<div>').css({ 'display': 'flex', 'gap': '8px', 'margin-top': '8px', 'flex-wrap': 'wrap' });
+        $('<button>').attr({ 'class': 'btn btn-xs btn-info' }).text('Dump API')
             .click(function () { _qrDumpAdventureAPI(); })
+            .appendTo($coopDebugRow);
+        $('<button>').attr({ 'class': 'btn btn-xs btn-success' }).text('Start Intercept')
+            .click(function () { _qrStartMsgIntercept(); })
+            .appendTo($coopDebugRow);
+        $('<button>').attr({ 'class': 'btn btn-xs btn-danger' }).text('Stop Intercept')
+            .click(function () { _qrStopMsgIntercept(); })
             .appendTo($coopDebugRow);
         $('<button>').attr({ 'class': 'btn btn-xs btn-warning' }).text('Test Invite')
             .click(function () {
