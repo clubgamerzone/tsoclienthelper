@@ -710,6 +710,135 @@ function _qrRenderSidebar() {
     }
 }
 
+// ---- Co-op friend list helper ----
+// Returns [{username, id}] combining friends + guild members (deduplicated by id)
+function _qrGetCoopFriendList() {
+    var seen = {}, result = [];
+    try {
+        var fl = globalFlash.gui.mFriendsList;
+        var friends = fl.GetFilteredFriends('', true) || [];
+        friends.forEach(function (f) {
+            if (f && f.id && f.username && !seen[f.id]) {
+                seen[f.id] = true;
+                result.push({ id: f.id, username: f.username });
+            }
+        });
+    } catch (e) {}
+    try {
+        var fl2 = globalFlash.gui.mFriendsList;
+        var members = fl2.GetFilteredGuildMembers ? fl2.GetFilteredGuildMembers('', true) : [];
+        if (!members || !members.length) {
+            // fallback: try GetGuildMembers
+            members = fl2.GetGuildMembers ? fl2.GetGuildMembers() : [];
+        }
+        (members || []).forEach(function (m) {
+            if (m && m.id && m.username && !seen[m.id]) {
+                seen[m.id] = true;
+                result.push({ id: m.id, username: m.username });
+            }
+        });
+    } catch (e) {}
+    result.sort(function (a, b) { return a.username.localeCompare(b.username); });
+    return result;
+}
+
+// ---- Introspect a Flash object's methods/properties (AS3 describeType) ----
+function _qrDescribeFlashObj(obj, label) {
+    var lines = [];
+    try {
+        var xml = window.runtime.flash.utils.describeType(obj);
+        var parser = new DOMParser();
+        var doc = parser.parseFromString(xml, 'text/xml');
+        var root = doc.firstChild;
+        // Methods
+        var methods = root.querySelectorAll('method');
+        for (var i = 0; i < methods.length; i++) {
+            var m = methods[i];
+            var name = m.getAttribute('name');
+            var ret  = m.getAttribute('returnType');
+            var params = [];
+            var pNodes = m.querySelectorAll('parameter');
+            for (var j = 0; j < pNodes.length; j++) {
+                params.push(pNodes[j].getAttribute('type'));
+            }
+            lines.push('  M: ' + name + '(' + params.join(', ') + ') → ' + ret);
+        }
+        // Accessors (properties)
+        var accessors = root.querySelectorAll('accessor');
+        for (var i = 0; i < accessors.length; i++) {
+            var a = accessors[i];
+            lines.push('  A: ' + a.getAttribute('name') + ' [' + a.getAttribute('access') + '] : ' + a.getAttribute('type'));
+        }
+        // Variables
+        var vars = root.querySelectorAll('variable');
+        for (var i = 0; i < vars.length; i++) {
+            var v = vars[i];
+            lines.push('  V: ' + v.getAttribute('name') + ' : ' + v.getAttribute('type'));
+        }
+    } catch (e) {
+        lines.push('  describeType error: ' + e);
+    }
+    // Also enumerate JS-visible props
+    try {
+        for (var k in obj) {
+            if (typeof obj[k] === 'function') {
+                lines.push('  JS fn: ' + k);
+            }
+        }
+    } catch (e) {}
+    var header = '=== ' + (label || 'Object') + ' ===';
+    return header + '\n' + lines.join('\n');
+}
+
+// ---- Dump adventure-related API info to chat ----
+function _qrDumpAdventureAPI() {
+    var out = [];
+    try {
+        var AdvManager = swmmo.getDefinitionByName("com.bluebyte.tso.adventure.logic::AdventureManager").getInstance();
+        out.push(_qrDescribeFlashObj(AdvManager, 'AdventureManager'));
+        // Dump one adventure item if available
+        var advs = AdvManager.getAdventures();
+        if (advs && advs.length > 0) {
+            out.push(_qrDescribeFlashObj(advs[0], 'Adventure[0] (' + advs[0].adventureName + ')'));
+        }
+    } catch (e) { out.push('AdventureManager error: ' + e); }
+    // ServiceManager
+    try {
+        var svc = swmmo.getDefinitionByName("com.bluebyte.tso.service::ServiceManager").getInstance();
+        out.push(_qrDescribeFlashObj(svc, 'ServiceManager'));
+        // Check for adventure service
+        try { out.push(_qrDescribeFlashObj(svc.adventure, 'ServiceManager.adventure')); } catch (e) {}
+        try { out.push(_qrDescribeFlashObj(svc.coop, 'ServiceManager.coop')); } catch (e) {}
+    } catch (e) { out.push('ServiceManager error: ' + e); }
+    // ClientMessages
+    try {
+        var cm = game.gi.mClientMessages;
+        out.push(_qrDescribeFlashObj(cm, 'mClientMessages'));
+    } catch (e) { out.push('mClientMessages error: ' + e); }
+    // FriendsList - check for invite methods
+    try {
+        var fl = globalFlash.gui.mFriendsList;
+        out.push(_qrDescribeFlashObj(fl, 'mFriendsList'));
+    } catch (e) { out.push('mFriendsList error: ' + e); }
+    // Write to file for easy reading
+    var resultText = out.join('\n\n');
+    try {
+        var f = air.File.applicationStorageDirectory.resolvePath('adventure_api_dump.txt');
+        var fs = new air.FileStream();
+        fs.open(f, 'write');
+        fs.writeUTFBytes(resultText);
+        fs.close();
+        showGameAlert('API dump written to:\n' + f.nativePath + '\n\nFirst 500 chars:\n' + resultText.substring(0, 500));
+    } catch (e) {
+        showGameAlert('API dump (first 800 chars):\n' + resultText.substring(0, 800));
+    }
+    // Also log to chat
+    var chatLines = resultText.split('\n');
+    for (var i = 0; i < chatLines.length && i < 100; i++) {
+        game.chatMessage(chatLines[i], 'adventurer');
+    }
+}
+
 // ---- Editor (right panel) ----
 function _qrRenderEditor() {
     // Preserve scroll position across re-renders
@@ -795,6 +924,146 @@ function _qrRenderEditor() {
         .append($advInfoP)
         .appendTo($advRow);
     $ed.append($advRow);
+
+    // ---- Co-op section ----
+    (function () {
+        var coop = profile.coop || {};
+        var coopEnabled  = !!coop.enabled;
+        var coopCount    = Math.max(1, parseInt(coop.count, 10) || 1);
+        var coopFriends  = coop.friends || [];  // [{username}]
+        var coopCollapsed = !!coop.collapsed;
+
+        // Section header
+        var $coopHeader = $('<div>').css({
+            'background': '#2a2a2a', 'border': '1px solid #444', 'border-radius': '4px',
+            'padding': '5px 10px', 'margin-bottom': '4px', 'cursor': 'pointer',
+            'display': 'flex', 'align-items': 'center', 'justify-content': 'space-between'
+        });
+        var $coopTitle = $('<span>').css({ 'font-weight': 'bold', 'color': '#7ec8e3', 'font-size': '12px' })
+            .text((coopCollapsed ? '▶' : '▼') + ' Co-op');
+        $coopHeader.append($coopTitle);
+
+        // Enabled badge shown in header when collapsed
+        var $coopBadge = $('<span>').css({ 'font-size': '11px', 'color': coopEnabled ? '#8bc34a' : '#888' })
+            .text(coopEnabled ? 'ON' : 'OFF');
+        $coopHeader.append($coopBadge);
+
+        var $coopBody = $('<div>').attr('id', 'qrCoopBody')
+            .css({ 'padding': '8px 4px 4px 4px', 'margin-bottom': '8px', 'display': coopCollapsed ? 'none' : 'block' });
+
+        $coopHeader.click(function () {
+            coopCollapsed = !coopCollapsed;
+            $coopTitle.text((coopCollapsed ? '▶' : '▼') + ' Co-op');
+            $coopBody.toggle(!coopCollapsed);
+            if (_qrProfile) {
+                _qrProfile.coop = _qrProfile.coop || {};
+                _qrProfile.coop.collapsed = coopCollapsed;
+            }
+        });
+
+        // Row 1: Enable toggle + friend count
+        var $row1 = $('<div>').css({ 'display': 'flex', 'align-items': 'center', 'gap': '12px', 'margin-bottom': '8px' });
+
+        // Enable checkbox
+        var $chkWrap = $('<label>').css({ 'display': 'flex', 'align-items': 'center', 'gap': '5px', 'color': '#ddd', 'font-size': '12px', 'cursor': 'pointer', 'margin': '0' });
+        var $chk = $('<input>').attr({ 'type': 'checkbox', 'id': 'qrCoopEnabled' }).prop('checked', coopEnabled);
+        $chkWrap.append($chk, $('<span>').text('Enable Co-op'));
+        $row1.append($chkWrap);
+
+        // Friend count
+        var $countWrap = $('<label>').css({ 'display': 'flex', 'align-items': 'center', 'gap': '5px', 'color': '#ddd', 'font-size': '12px', 'margin': '0' });
+        var $countInp = $('<input>').attr({ 'type': 'number', 'id': 'qrCoopCount', 'min': '1', 'max': '5', 'class': 'form-control input-sm' })
+            .css({ 'width': '55px', 'display': 'inline-block' }).val(coopCount);
+        $countWrap.append($('<span>').text('Friends:'), $countInp);
+        $row1.append($countWrap);
+
+        $coopBody.append($row1);
+
+        // Build datalist for autocomplete
+        var friendList = _qrGetCoopFriendList();
+        var $datalist = $('<datalist>').attr('id', 'qrCoopFriendList');
+        friendList.forEach(function (f) {
+            $('<option>').val(f.username).appendTo($datalist);
+        });
+        $coopBody.append($datalist);
+
+        // Friend name rows container
+        var $friendRows = $('<div>').attr('id', 'qrCoopFriendRows');
+        $coopBody.append($friendRows);
+
+        function _renderFriendRows(n) {
+            $friendRows.empty();
+            for (var i = 0; i < n; i++) {
+                var savedName = (coopFriends[i] && coopFriends[i].username) || '';
+                var $fr = $('<div>').css({ 'display': 'flex', 'align-items': 'center', 'gap': '8px', 'margin-bottom': '5px' });
+                $('<span>').css({ 'color': '#aaa', 'font-size': '12px', 'min-width': '60px' })
+                    .text('Friend ' + (i + 1) + ':')
+                    .appendTo($fr);
+                var $nameInp = $('<input>')
+                    .attr({ 'type': 'text', 'class': 'form-control input-sm qrCoopFriendName',
+                            'list': 'qrCoopFriendList', 'placeholder': 'Player name…',
+                            'data-idx': i })
+                    .css({ 'max-width': '200px' })
+                    .val(savedName);
+
+                // Status indicator: green check if name matches a known friend
+                var $status = $('<span>').css({ 'font-size': '12px', 'min-width': '18px' });
+                function updateStatus($inp, $s) {
+                    var v = $inp.val().trim();
+                    var match = friendList.some(function (f) { return f.username === v; });
+                    $s.text(match ? '✓' : (v ? '?' : ''));
+                    $s.css('color', match ? '#8bc34a' : '#ff9800');
+                }
+                $nameInp.on('input change', function () { updateStatus($(this), $status); });
+                updateStatus($nameInp, $status);
+
+                $fr.append($nameInp, $status);
+                $friendRows.append($fr);
+            }
+        }
+
+        _renderFriendRows(coopCount);
+
+        // Re-render rows when count changes
+        $countInp.on('change input', function () {
+            var n = Math.max(1, Math.min(5, parseInt($(this).val(), 10) || 1));
+            $(this).val(n);
+            coopCount = n;
+            _renderFriendRows(n);
+        });
+
+        // Update badge on toggle
+        $chk.on('change', function () {
+            $coopBadge.text($(this).is(':checked') ? 'ON' : 'OFF')
+                      .css('color', $(this).is(':checked') ? '#8bc34a' : '#888');
+        });
+
+        // ---- Co-op debug / API discovery buttons ----
+        var $coopDebugRow = $('<div>').css({ 'display': 'flex', 'gap': '8px', 'margin-top': '8px' });
+        $('<button>').attr({ 'class': 'btn btn-xs btn-info' }).text('Dump Adventure API')
+            .click(function () { _qrDumpAdventureAPI(); })
+            .appendTo($coopDebugRow);
+        $('<button>').attr({ 'class': 'btn btn-xs btn-warning' }).text('Test Invite')
+            .click(function () {
+                var friendName = ($('#qrCoopFriendRows .qrCoopFriendName').first().val() || '').trim();
+                if (!friendName) { showGameAlert('Enter a friend name first.'); return; }
+                // Resolve friend ID from name
+                var friendId = null;
+                var allFriends = _qrGetCoopFriendList();
+                allFriends.forEach(function (f) { if (f.username === friendName) { friendId = f.id; } });
+                if (!friendId) { showGameAlert('Friend "' + friendName + '" not found in friends/guild list.'); return; }
+                // Try to find the active adventure zone
+                var advKey = profile.adventureNameKey || '';
+                var zoneId = advKey ? _qrResolveAdventureZone(advKey) : null;
+                if (!zoneId) { showGameAlert('No active adventure zone found for "' + advKey + '". Place the adventure first.'); return; }
+                // Attempt invitation via known patterns
+                _qrTryInviteFriend(friendId, friendName, zoneId, advKey);
+            })
+            .appendTo($coopDebugRow);
+        $coopBody.append($coopDebugRow);
+
+        $ed.append($coopHeader, $coopBody);
+    }());
 
     // ---- Min Army section ----
     var minArmy = profile.minArmy || {};
@@ -1321,6 +1590,19 @@ function _qrSaveCurrentFromUI() {
     profile.adventureNameKey     = $('#qrAdvSel').val() || '';
     profile.adventureDisplayName  = $('#qrAdvSel option:selected').attr('data-display') || '';
     profile.adventureType         = $('#qrAdvSel option:selected').attr('data-type') || '';
+
+    // Co-op settings
+    var coopFriendsSaved = [];
+    $('#qrCoopFriendRows .qrCoopFriendName').each(function () {
+        var v = $(this).val().trim();
+        if (v) { coopFriendsSaved.push({ username: v }); }
+    });
+    profile.coop = {
+        enabled:   $('#qrCoopEnabled').is(':checked'),
+        count:     Math.max(1, parseInt($('#qrCoopCount').val(), 10) || 1),
+        friends:   coopFriendsSaved,
+        collapsed: (profile.coop && profile.coop.collapsed) || false
+    };
 
     // minArmy is now derived from per-step stepMinArmy — recompute and save
     var newMinArmy = {};
@@ -2140,7 +2422,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         ['LOAD_ARMY',                  'LOAD ARMY'],
         ['DELAY',                      'DELAY'],
         ['COLLECTIBLES',               'COLLECT COLLECTIBLES'],
-        ['FILL_AND_RETURN',            'FILL GENERALS \u2192 STAR'],
+        ['FILL_AND_RETURN',            'FILL GENERALS \u2192 HOME'],
         ['CLAIM_QUESTS',               'COMPLETE QUEST'],
         ['COLLECT_ALL_QUESTS',         'COLLECT ALL + QUESTS'],
         ['RETURN_HOME',                'RETURN TO ISLAND']
@@ -2936,7 +3218,7 @@ function _qrBsUpdateStepProgress(idx, steps) {
         WAIT_ATTACKING: 'WAIT \u2014 attacking', WAIT_GARRISON: 'WAIT \u2014 position',
         WAIT_IDLE: 'WAIT \u2014 idle',        UNLOAD: 'UNLOAD army',
         LOAD_ARMY: 'LOAD ARMY',               DELAY: 'DELAY',
-        COLLECTIBLES: 'COLLECT',              FILL_AND_RETURN: 'FILL \u2192 STAR',
+        COLLECTIBLES: 'COLLECT',              FILL_AND_RETURN: 'FILL \u2192 HOME',
         CLAIM_QUESTS: 'CLAIM QUEST REWARDS',  TRANSFER_TO_ENEMY_GARRISON: 'TRANSFER \u2192 near enemy',
         MOVE_TO_GRID: 'MOVE \u2192 grid'
     };
@@ -3629,50 +3911,40 @@ function _qrRunBattleScript(startIdx) {
                 }
 
                 case 'FILL_AND_RETURN': {
-                    game.chatMessage('FILL_AND_RETURN: filling all profile generals then returning to star...', 'adventurer');
+                    // Phase 1: Unload ALL profile generals (puts everything back in the free pool).
+                    // Phase 2: Fill each general to their generalCapacity from the pool, then send home.
+                    game.chatMessage('FILL_AND_RETURN: starting\u2026', 'adventurer');
                     try {
-                        // Collect unique general UIDs from all battle script steps (appearance order)
-                        var frUIDs = [];
-                        var frSeen = {};
-                        state.steps.forEach(function (s) {
+                        // Collect unique general UIDs + their capacities from profile
+                        var frUIDs = [], frSeen = {}, frCaps = {};
+                        (state.profile.steps || []).forEach(function (s) {
                             if (s.generalUID && !frSeen[s.generalUID]) {
                                 frSeen[s.generalUID] = true;
                                 frUIDs.push(s.generalUID);
+                                frCaps[s.generalUID] = s.generalCapacity || 200;
                             }
                         });
                         if (frUIDs.length === 0) {
-                            game.chatMessage('FILL_AND_RETURN: no generals found in profile steps — skipping.', 'adventurer');
+                            game.chatMessage('FILL_AND_RETURN: no generals found in profile \u2014 skipping.', 'adventurer');
                             setTimeout(runNextStep, 1000);
                             break;
                         }
-
-                        // Get manually-set capacity for a UID (generalCapacity field in the generals tab)
-                        function frGetCap(uid) {
-                            var cap = 0;
-                            (state.profile.steps || []).some(function (s) {
-                                if (s.generalUID === uid && s.generalCapacity > 0) { cap = s.generalCapacity; return true; }
-                                return false;
-                            });
-                            return cap || 200;
-                        }
-
-                        // Names resolved at unload time so they're available during load/send-home
+                        var frHomeId = game.gi.mCurrentPlayer.GetHomeZoneId();
                         var frNames = {};
 
-                        // ── PHASE 1: Unload ALL generals one by one ──
+                        // ── PHASE 1: Unload ALL generals sequentially ──
                         var frUnloadIdx = 0;
                         function frUnloadNext() {
                             if (state.stopped) { return; }
                             if (frUnloadIdx >= frUIDs.length) {
-                                // All unloaded — wait 2s for server to credit all units back to the pool
-                                game.chatMessage('FILL_AND_RETURN: all generals unloaded — pool settling...', 'adventurer');
-                                setTimeout(frBeginLoading, 2000);
+                                game.chatMessage('FILL_AND_RETURN: all generals unloaded \u2014 pool settling\u2026', 'adventurer');
+                                setTimeout(frFillNext, 2000);
                                 return;
                             }
                             var uid = frUIDs[frUnloadIdx++];
                             var spec = _qrFindSpecByUID(uid);
                             if (!spec) {
-                                game.chatMessage('FILL_AND_RETURN: general not found at unload — skipping.', 'adventurer');
+                                game.chatMessage('FILL_AND_RETURN: general not found for unload \u2014 skipping.', 'adventurer');
                                 setTimeout(frUnloadNext, 500);
                                 return;
                             }
@@ -3681,22 +3953,23 @@ function _qrRunBattleScript(startIdx) {
                             frNames[uid] = name;
 
                             if (!spec.HasUnits || !spec.HasUnits()) {
-                                game.chatMessage('FILL_AND_RETURN: ' + name + ' — already empty.', 'adventurer');
+                                game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2014 already empty.', 'adventurer');
                                 setTimeout(frUnloadNext, 500);
                                 return;
                             }
 
-                            game.chatMessage('FILL_AND_RETURN: unloading ' + name + '...', 'adventurer');
+                            game.chatMessage('FILL_AND_RETURN: unloading ' + name + '\u2026', 'adventurer');
                             try {
                                 var frUnload = new dRaiseArmyVODef();
                                 frUnload.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
+                                // Empty unitSquads = unload all
                                 game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, frUnload, armyResponder);
                             } catch (e) {
                                 game.chatMessage('FILL_AND_RETURN: unload error for ' + name + ': ' + e, 'adventurer');
                                 setTimeout(frUnloadNext, 1000);
                                 return;
                             }
-                            // Poll until HasUnits = false (up to 30s)
+                            // Poll until HasUnits = false (timeout 30s)
                             var frUTicks = 0;
                             var ivFrU = setInterval(function () {
                                 if (state.stopped) { clearInterval(ivFrU); return; }
@@ -3706,40 +3979,33 @@ function _qrRunBattleScript(startIdx) {
                                 try { stillHas = s2 && s2.HasUnits && s2.HasUnits(); } catch (e) {}
                                 if (!stillHas || frUTicks > 15) {
                                     clearInterval(ivFrU);
-                                    if (stillHas) { game.chatMessage('FILL_AND_RETURN: ' + name + ' unload timeout.', 'adventurer'); }
+                                    if (stillHas) { game.chatMessage('FILL_AND_RETURN: ' + name + ' unload timeout \u2014 continuing.', 'adventurer'); }
                                     frUnloadNext();
                                 }
                             }, 2000);
                         }
 
-                        // ── PHASE 2: Load and send home one by one (highest capacity first) ──
-                        var frLoadUIDs = frUIDs.slice().sort(function (a, b) { return frGetCap(b) - frGetCap(a); });
-                        var frLoadIdx = 0;
-
-                        function frBeginLoading() {
+                        // ── PHASE 2: Fill each general from pool, then send home ──
+                        var frFillIdx = 0;
+                        function frFillNext() {
                             if (state.stopped) { return; }
-                            frLoadNext();
-                        }
-
-                        function frLoadNext() {
-                            if (state.stopped) { return; }
-                            if (frLoadIdx >= frLoadUIDs.length) {
+                            if (frFillIdx >= frUIDs.length) {
                                 game.chatMessage('FILL_AND_RETURN: all generals filled and sent home.', 'adventurer');
                                 setTimeout(runNextStep, 1000);
                                 return;
                             }
-                            var uid = frLoadUIDs[frLoadIdx++];
+                            var uid = frUIDs[frFillIdx++];
                             var name = frNames[uid] || uid;
-                            var maxCap = frGetCap(uid);
+                            var maxCap = frCaps[uid];
 
                             var spec = _qrFindSpecByUID(uid);
                             if (!spec) {
-                                game.chatMessage('FILL_AND_RETURN: ' + name + ' — not found at load, skipping.', 'adventurer');
-                                setTimeout(frLoadNext, 500);
+                                game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2014 not found for fill, skipping.', 'adventurer');
+                                setTimeout(frFillNext, 500);
                                 return;
                             }
 
-                            // Read the live free pool
+                            // Read live free pool
                             var frArmy = {}, frTotal = 0;
                             try {
                                 var livePool = {};
@@ -3766,12 +4032,12 @@ function _qrRunBattleScript(startIdx) {
 
                             var frUnitTypes = Object.keys(frArmy).filter(function (t) { return frArmy[t] > 0; });
                             if (frUnitTypes.length === 0) {
-                                game.chatMessage('FILL_AND_RETURN: ' + name + ' — pool empty, sending home empty.', 'adventurer');
+                                game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2014 pool empty, sending home empty.', 'adventurer');
                                 frSendHome(uid, name);
                                 return;
                             }
 
-                            game.chatMessage('FILL_AND_RETURN: loading ' + name + ' with ' + frTotal + '/' + maxCap + ' units...', 'adventurer');
+                            game.chatMessage('FILL_AND_RETURN: loading ' + name + ' with ' + frTotal + '/' + maxCap + ' units\u2026', 'adventurer');
                             try {
                                 var frLoad = new dRaiseArmyVODef();
                                 frLoad.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
@@ -3788,7 +4054,7 @@ function _qrRunBattleScript(startIdx) {
                                 return;
                             }
 
-                            // Poll until army confirmed on general, timeout 30s
+                            // Poll until army confirmed on general (timeout 30s)
                             var frLTicks = 0;
                             var ivFrL = setInterval(function () {
                                 if (state.stopped) { clearInterval(ivFrL); return; }
@@ -3802,24 +4068,7 @@ function _qrRunBattleScript(startIdx) {
                                 } catch (e) {}
                                 if (liveLoaded >= frTotal || frLTicks > 15) {
                                     clearInterval(ivFrL);
-                                    var freeLeft = 0;
-                                    try {
-                                        game.zone.GetArmy(game.gi.mCurrentPlayer.GetPlayerId())
-                                            .GetSquadsCollection_vector()
-                                            .forEach(function (sq) {
-                                                if (sq.GetType && sq.GetType().toLowerCase().indexOf('expedition') < 0) {
-                                                    freeLeft += sq.GetAmount ? sq.GetAmount() : 0;
-                                                }
-                                            });
-                                    } catch (e) {}
-                                    if (liveLoaded < maxCap && freeLeft > 0) {
-                                        game.chatMessage('FILL_AND_RETURN: WARNING \u2014 ' + name + ' has ' + liveLoaded + '/' + maxCap + ' but ' + freeLeft + ' units still in pool!', 'adventurer');
-                                    } else if (liveLoaded === 0 && freeLeft === 0) {
-                                        // Pool consumed, client state didn't update — server likely accepted it
-                                        game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2014 load accepted server-side (' + frTotal + ' units sent) \u2713', 'adventurer');
-                                    } else {
-                                        game.chatMessage('FILL_AND_RETURN: ' + name + ' confirmed ' + liveLoaded + '/' + maxCap + ' \u2713', 'adventurer');
-                                    }
+                                    game.chatMessage('FILL_AND_RETURN: ' + name + ' confirmed ' + liveLoaded + '/' + maxCap + ' \u2713', 'adventurer');
                                     frSendHome(uid, name);
                                 }
                             }, 2000);
@@ -3830,15 +4079,15 @@ function _qrRunBattleScript(startIdx) {
                             try {
                                 var spec = _qrFindSpecByUID(uid);
                                 if (spec) {
-                                    armyServices.specialist.sendToZone(spec, game.gi.mCurrentPlayer.GetHomeZoneId());
-                                    game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2192 sent home.', 'adventurer');
+                                    armyServices.specialist.sendToZone(spec, frHomeId);
+                                    game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2192 home.', 'adventurer');
                                 } else {
-                                    game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2014 not found for send-home (already left?).', 'adventurer');
+                                    game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2014 not found for send-home.', 'adventurer');
                                 }
                             } catch (e) {
                                 game.chatMessage('FILL_AND_RETURN: send-home error for ' + name + ': ' + e, 'adventurer');
                             }
-                            setTimeout(frLoadNext, 1500);
+                            setTimeout(frFillNext, 1500);
                         }
 
                         frUnloadNext();

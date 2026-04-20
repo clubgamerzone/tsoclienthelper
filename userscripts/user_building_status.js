@@ -106,13 +106,15 @@ function _bsMenuHandler() {
                              .text('Auto Update: ON').prop('outerHTML') +
                 '&nbsp;&nbsp;<span id="bsTotalSpan" style="font-weight:bold;"></span>' +
                 createTableRow([
-                    [1, '#'], [2, 'Building'], [1, 'Lvl'], [1, 'Deposit'],
-                    [2, 'Status'], [2, 'Time Left'], [2, 'Storage'], [1, 'Buffed']
+                    [2, 'Building'], [1, 'Produces'], [1, 'Deposit'],
+                    [2, 'Status'], [1, 'Action'], [2, 'Time Left'], [2, 'Storage'], [1, 'Buffed']
                 ], true) +
                 '</div>'
             );
 
             $('#bsRefreshBtn').click(function () { _bsRefresh(); });
+
+
 
             $('#bsAutoBtn').click(function () {
                 _bsAutoUpdate = !_bsAutoUpdate;
@@ -280,6 +282,7 @@ function _bsGetData() {
                 BuffEnd:          buffEndStr,
                 BuffName:         buffName,
                 IsMine:           isMine,
+                Produces:         '',
                 DepositAmt:       0,
                 SecsToDeplete:    0,
                 OreInStorage:     0,
@@ -344,11 +347,31 @@ function _bsGetData() {
                     }
                 } catch (e) {}
 
+                entry.Produces = oreName ? (loca.GetText('RES', oreName) || oreName) : '';
+
                 var mCat = _bsClassify(nameKey);
                 if      (mCat === 'Wood & Paper')   wood.push(entry);
                 else if (mCat === 'Food & Farming') food.push(entry);
                 else                                mines.push(entry);
             } else {
+                // Detect what resource this building produces
+                try {
+                    var pqProd = bld.productionQueue;
+                    if (pqProd && pqProd.mTimedProductions_vector && pqProd.mTimedProductions_vector.length > 0) {
+                        var poName = pqProd.mTimedProductions_vector[0].GetProductionOrder().GetName_string();
+                        if (poName) entry.Produces = loca.GetText('RES', poName) || poName;
+                    }
+                } catch(e) {}
+                if (!entry.Produces && gEcon) {
+                    try {
+                        var rcDef = gEcon.GetResourcesCreationDefinitionForBuilding(nameKey);
+                        if (rcDef && rcDef.GetName_string) {
+                            var rcRes = rcDef.GetName_string();
+                            if (rcRes) entry.Produces = loca.GetText('RES', rcRes) || rcRes;
+                        }
+                    } catch(e) {}
+                }
+
                 var cat = _bsClassify(nameKey);
                 if      (cat === 'Weapons')        weapons.push(entry);
                 else if (cat === 'Wood & Paper')   wood.push(entry);
@@ -478,18 +501,28 @@ function _bsRenderData(groups) {
                 .replace('<img', '<img id="bsGoto_' + b.Grid + '"')
                 .replace('style="', 'style="cursor:pointer;vertical-align:middle;');
 
-            var depositCell = b.IsMine ? b.DepositAmt.toLocaleString() : 'â€”';
-            var storageCell = b.IsMine ? b.OreInStorage.toLocaleString() : 'â€”';
+            var depositCell = b.IsMine ? b.DepositAmt.toLocaleString() : '—';
+            var storageCell = b.IsMine ? b.OreInStorage.toLocaleString() : '—';
             var buffCell    = b.BuffEnd
                 ? '<span class="bs-buffed" title="' + b.BuffName + '">' + b.BuffEnd + '</span>'
-                : 'â€”';
+                : '—';
+
+            var actionBtn = '—';
+            if (!isExhausted && !b.IsUpgrading) {
+                var isActive = (b.Status === 1);
+                var btnColor = isActive ? '#c0392b' : '#27ae60';
+                actionBtn = '<button class="btn btn-xs bs-togglebtn"' +
+                            ' style="background-color:' + btnColor + ';color:#fff;border-color:' + btnColor + ';"' +
+                            ' data-grid="' + b.Grid + '" data-active="' + (isActive ? 1 : 0) + '">' +
+                            (isActive ? 'Stop' : 'Start') + '</button>';
+            }
 
             out += createTableRow([
-                [1, idx + '&nbsp;' + gotoIcon],
-                [2, b.Name],
-                [1, b.Level],
+                [2, gotoIcon + '&nbsp;' + b.Name + ' Lv ' + (b.Level + 1)],
+                [1, b.Produces || '—'],
                 [1, depositCell],
                 [2, '<span class="' + statusClass + '">' + statusLabel + '</span>'],
+                [1, actionBtn],
                 [2, timeLeft],
                 [2, storageCell],
                 [1, buffCell]
@@ -508,6 +541,13 @@ function _bsRenderData(groups) {
         swmmo.application.mGameInterface.mCurrentPlayerZone.ScrollToGrid(grid);
     });
 
+    // Start / Stop production button
+    $('#bsModalData .bs-togglebtn').click(function () {
+        var grid     = parseInt($(this).data('grid'), 10);
+        var isActive = parseInt($(this).data('active'), 10) === 1;
+        _bsToggleProduction(grid, isActive);
+    });
+
     // Toggle section collapse on header click
     $('#bsModalData .bs-section').off('click').on('click', function () {
         var secId      = $(this).data('sec');
@@ -517,4 +557,12 @@ function _bsRenderData(groups) {
         content.toggle(!nowHidden);
         $(this).toggleClass('collapsed', nowHidden);
     });
+}
+
+// ---- Toggle a building's production on or off ----
+// Action 107: p1=1 start, p1=0 stop (confirmed from 7-building.js)
+function _bsToggleProduction(grid, isCurrentlyActive) {
+    var p1 = isCurrentlyActive ? 0 : 1;
+    game.gi.SendServerAction(107, p1, grid, 0, null);
+    setTimeout(function () { _bsRefresh(); }, 800);
 }
