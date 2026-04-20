@@ -112,6 +112,24 @@ var _qrBsStopFlag          = false; // global stop flag — backup for state.sto
 var _qrBsRepeat            = false; // repeat adventure after all steps complete
 var _qrRepeatIntervalId    = null;  // setInterval handle for the repeat-wait poll
 var _qrRepeatStatus        = null;  // status string shown in minimized panel during repeat wait
+var _qrChatLog             = [];    // rolling buffer of last 6 adventurer chat messages for minimized log
+
+// ---- Minimized log panel ----
+function _qrUpdateRunLog() {
+    var $panel = $('#qrRunLog');
+    if (!$panel.length) { return; }
+    if (!_qrModal || _qrModal.Body().is(':visible')) { $panel.hide(); return; }
+    $panel.empty().show();
+    _qrChatLog.forEach(function (msg, i) {
+        var isLast = (i === _qrChatLog.length - 1);
+        $('<div>').css({
+            color: isLast ? '#f0c040' : '#777',
+            'font-size': isLast ? '11px' : '10px',
+            'font-weight': isLast ? 'bold' : 'normal',
+            'white-space': 'nowrap', 'overflow': 'hidden', 'text-overflow': 'ellipsis'
+        }).text(msg).appendTo($panel);
+    });
+}
 
 // ---- Modal minimize/restore ----
 function _qrMinimizeModal() {
@@ -123,6 +141,7 @@ function _qrMinimizeModal() {
     $('#questRunnerModal .modal-footer').css('pointer-events', 'auto');
     $('#qrMinimizeBtn').text('[+]').attr('title', 'Restore window');
     _qrBsUpdateControls();
+    _qrUpdateRunLog();
 }
 function _qrRestoreModal() {
     if (!_qrModal) { return; }
@@ -133,6 +152,7 @@ function _qrRestoreModal() {
     $('#questRunnerModal .modal-footer').css('pointer-events', '');
     $('#qrMinimizeBtn').text('[−]').attr('title', 'Minimize window');
     _qrBsUpdateControls();
+    _qrUpdateRunLog(); // hide when restoring
 }
 
 // ---- Persistence ----
@@ -567,6 +587,25 @@ function _qrOpenModal() {
                        'padding': '4px 8px', 'background': '#111',
                        'border': '1px solid #333', 'border-radius': '4px', 'clear': 'both' })
         );
+        // Log panel — shows recent adventurer chat messages while minimized
+        _qrModal.Footer().append(
+            $('<div>').attr('id', 'qrRunLog')
+                .css({ 'display': 'none', 'width': '100%', 'margin-top': '4px',
+                       'padding': '4px 8px', 'background': '#0d0d0d',
+                       'border': '1px solid #2a2a2a', 'border-radius': '4px', 'clear': 'both' })
+        );
+        // Hook game.chatMessage to capture adventurer messages into the log panel
+        (function () {
+            var _origChat = game.chatMessage;
+            game.chatMessage = function (msg, channel) {
+                _origChat.apply(this, arguments);
+                if (channel === 'adventurer') {
+                    _qrChatLog.push(msg);
+                    if (_qrChatLog.length > 6) { _qrChatLog.shift(); }
+                    _qrUpdateRunLog();
+                }
+            };
+        }());
     }
 
     _qrRenderAll();
@@ -1338,8 +1377,10 @@ function _qrSaveCurrentFromUI() {
         }
         var claimWaitSecs = parseInt($row.find('.qrCqWait').val(), 10) || 5;
         var targetGrid  = parseInt($row.attr('data-target-grid') || '0', 10) || 0;
+        var scanEnemy   = parseInt($row.attr('data-scan-enemy')  || '0', 10) || 0;
         var stepObj = { type: type, generalUID: genUID, generalName: genName, buildingName: bldName, buildingKey: bldKey, buildingDisplay: bldDisp, army: armyData, seconds: seconds, claimWaitSecs: claimWaitSecs };
         if (targetGrid)  { stepObj.targetGrid  = targetGrid; }
+        if (scanEnemy)   { stepObj.scanEnemy = scanEnemy; }
         newBs.push(stepObj);
     });
     profile.battleScript = newBs;
@@ -2058,9 +2099,10 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         FILL_AND_RETURN:  '#1a3a6b',
         CLAIM_QUESTS:     '#1a5c1a',
         COLLECT_ALL_QUESTS: '#6b5c1a',
-        TRANSFER_TO_ENEMY_GARRISON: '#5c2a6b'
+        TRANSFER_TO_ENEMY_GARRISON: '#5c2a6b',
+        MOVE_TO_GRID: '#2b6b4a'
     };
-    var needsGeneral  = ['MOVE', 'WAIT_ZONE', 'WAIT_AT_GARRISON', 'WAIT_ATTACKING', 'WAIT_GARRISON', 'ATTACK', 'WAIT_IDLE', 'UNLOAD', 'LOAD_ARMY', 'TRANSFER_TO_ENEMY_GARRISON'].indexOf(bsStep.type) >= 0;
+    var needsGeneral  = ['MOVE', 'WAIT_ZONE', 'WAIT_AT_GARRISON', 'WAIT_ATTACKING', 'WAIT_GARRISON', 'ATTACK', 'WAIT_IDLE', 'UNLOAD', 'LOAD_ARMY', 'TRANSFER_TO_ENEMY_GARRISON', 'MOVE_TO_GRID'].indexOf(bsStep.type) >= 0;
     var isFillReturn  = bsStep.type === 'FILL_AND_RETURN';
     var needsArmy     = bsStep.type === 'LOAD_ARMY';
     var needsBuilding = ['MOVE', 'WAIT_GARRISON', 'ATTACK', 'TRANSFER_TO_ENEMY_GARRISON'].indexOf(bsStep.type) >= 0;
@@ -2088,6 +2130,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         ['MOVE',                       'MOVE \u2192 garrison'],
         ['ATTACK',                     'ATTACK \u00d7 building'],
         ['TRANSFER_TO_ENEMY_GARRISON', 'TRANSFER \u2192 near enemy'],
+        ['MOVE_TO_GRID',               'MOVE \u2192 grid #'],
         ['WAIT_ZONE',                  'WAIT \u2014 arrives on island'],
         ['WAIT_AT_GARRISON',           'WAIT \u2014 ready at garrison'],
         ['WAIT_ATTACKING',             'WAIT \u2014 leaves garrison'],
@@ -2372,32 +2415,29 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
             var scanERow = Math.floor(bldGrid / scanW);
             var scanECol = bldGrid % scanW;
 
-            // Detect blocking-check method
-            var scanMethod = 'none';
-            var scanBG = null;
-            try { scanBG = game.zone.mStreetDataMap.mBlockingGrid; if (scanBG && scanBG.length > 0) { scanMethod = 'mBlockingGrid[' + scanBG.length + ']'; } } catch (e) {}
-            if (scanMethod === 'none') {
-                try {
-                    var sdm = game.zone.mStreetDataMap;
-                    var fns = ['GetIsBlocking', 'IsBlocking', 'isBlocking', 'GetBlocking'];
-                    for (var fi = 0; fi < fns.length; fi++) {
-                        if (typeof sdm[fns[fi]] === 'function') { scanMethod = fns[fi] + '()'; break; }
-                    }
-                } catch (e) {}
-            }
-            if (scanMethod === 'none') { scanMethod = 'building-only'; }
+            // Detect blocking-check method — prefer engine's garrison placement check
+            var scanMethod = '3x3+pathfinder';
+
+            // Get pathfinder origin from the enemy building
+            var scanPathOrigin = -1;
+            try {
+                var scanRefBld = game.zone.mStreetDataMap.GetBuildingByGridPos(bldGrid);
+                if (!scanRefBld) { scanRefBld = game.zone.GetBuildingFromGridPosition(bldGrid); }
+                if (scanRefBld) { scanPathOrigin = scanRefBld.GetStreetGridEntry(); }
+            } catch (e) {}
+            if (scanPathOrigin < 0) { scanPathOrigin = bldGrid; }
 
             function scanCellFree(g) {
-                if (scanBG && scanBG.length > g) { return scanBG[g] === 0; }
-                try {
-                    var sdm2 = game.zone.mStreetDataMap;
-                    var fns2 = ['GetIsBlocking', 'IsBlocking', 'isBlocking', 'GetBlocking'];
-                    for (var fi2 = 0; fi2 < fns2.length; fi2++) {
-                        if (typeof sdm2[fns2[fi2]] === 'function') { return !sdm2[fns2[fi2]](g); }
-                    }
-                } catch (e) {}
                 try { return !game.zone.GetBuildingFromGridPosition(g); } catch (e) {}
-                return true;
+                return false;
+            }
+
+            function scanIsReachable(g) {
+                try {
+                    var path = game.gi.mPathFinder.CalculatePath(scanPathOrigin, g, null, true);
+                    return path && path.pathLenX10000 > 0;
+                } catch (e) {}
+                return false;
             }
 
             $tfeGridSel.empty();
@@ -2410,11 +2450,19 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
             var scanResults = [];
             for (var dr = -SCAN_RADIUS; dr <= SCAN_RADIUS; dr++) {
                 for (var dc = -SCAN_RADIUS; dc <= SCAN_RADIUS; dc++) {
-                    if (dr === 0 && dc === 0) { continue; } // skip the enemy cell itself
+                    if (dr === 0 && dc === 0) { continue; }
                     var sr = scanERow + dr, sc = scanECol + dc;
-                    if (sr < 0 || sc < 0 || sc >= scanW) { continue; }
+                    if (sr < 1 || sc < 1 || sc >= scanW - 1) { continue; }
                     var cand = sr * scanW + sc;
-                    if (scanCellFree(cand)) {
+                    // Check 3x3 area has no buildings
+                    var allFree = true;
+                    for (var ar = -1; ar <= 1 && allFree; ar++) {
+                        for (var ac = -1; ac <= 1 && allFree; ac++) {
+                            if (!scanCellFree((sr + ar) * scanW + (sc + ac))) { allFree = false; }
+                        }
+                    }
+                    // Then verify reachable (not water/mountains)
+                    if (allFree && scanIsReachable(cand)) {
                         scanResults.push({ grid: cand, row: sr, col: sc, dist: Math.abs(dr) + Math.abs(dc) });
                     }
                 }
@@ -2546,6 +2594,231 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
             .val(bsStep.seconds || 5).appendTo($row);
     }
 
+    // MOVE_TO_GRID: x/y coordinate inputs + grid number + scan nearby empty cells
+    if (bsStep.type === 'MOVE_TO_GRID') {
+        // Resolve map width for x/y <-> grid conversion
+        var _mtgW = 0;
+        try { var _mtgSdm = game.gi.mCurrentPlayerZone.mStreetDataMap; _mtgW = _mtgSdm.mWidth || _mtgSdm.mMapWidth || _mtgSdm.mNumCols || 0; } catch (e) {}
+        if (!_mtgW) { try { var _mtgSdm2 = game.zone.mStreetDataMap; _mtgW = _mtgSdm2.mWidth || _mtgSdm2.mMapWidth || _mtgSdm2.mNumCols || 0; } catch (e) {} }
+        if (!_mtgW) { _mtgW = 89; }
+
+        var _mtgInitGrid = bsStep.targetGrid || 0;
+        var _mtgInitX = _mtgInitGrid ? (_mtgInitGrid % _mtgW) : '';
+        var _mtgInitY = _mtgInitGrid ? Math.floor(_mtgInitGrid / _mtgW) : '';
+        var _mtgSyncing = false; // prevent feedback loops
+
+        $('<span>').css({ 'color': '#ccc', 'font-size': '11px', 'flex-shrink': '0' }).text('x:').appendTo($row);
+        var $mtgXInput = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
+                            'min': '0', 'placeholder': 'col' })
+            .css({ 'width': '60px', 'flex-shrink': '0' })
+            .val(_mtgInitX);
+        $mtgXInput.appendTo($row);
+
+        $('<span>').css({ 'color': '#ccc', 'font-size': '11px', 'flex-shrink': '0' }).text('y:').appendTo($row);
+        var $mtgYInput = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
+                            'min': '0', 'placeholder': 'row' })
+            .css({ 'width': '60px', 'flex-shrink': '0' })
+            .val(_mtgInitY);
+        $mtgYInput.appendTo($row);
+
+        $('<span>').css({ 'color': '#888', 'font-size': '10px', 'flex-shrink': '0' }).text('G:').appendTo($row);
+        var $gridInput = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs qrBsGridInput',
+                            'min': '1', 'placeholder': 'grid#' })
+            .css({ 'width': '80px', 'flex-shrink': '0', 'color': '#999', 'font-size': '11px' })
+            .val(_mtgInitGrid || '');
+
+        // x/y → grid sync
+        function _mtgXYtoGrid() {
+            if (_mtgSyncing) return;
+            _mtgSyncing = true;
+            var xx = parseInt($mtgXInput.val(), 10), yy = parseInt($mtgYInput.val(), 10);
+            if (!isNaN(xx) && !isNaN(yy) && xx >= 0 && yy >= 0) {
+                var g = yy * _mtgW + xx;
+                $gridInput.val(g);
+                $row.attr('data-target-grid', g);
+            }
+            _mtgSyncing = false;
+        }
+        // grid → x/y sync
+        function _mtgGridToXY() {
+            if (_mtgSyncing) return;
+            _mtgSyncing = true;
+            var g = parseInt($gridInput.val(), 10);
+            if (g > 0) {
+                $mtgXInput.val(g % _mtgW);
+                $mtgYInput.val(Math.floor(g / _mtgW));
+                $row.attr('data-target-grid', g);
+            }
+            _mtgSyncing = false;
+        }
+
+        $mtgXInput.on('change input', _mtgXYtoGrid);
+        $mtgYInput.on('change input', _mtgXYtoGrid);
+        $gridInput.on('change input', _mtgGridToXY);
+        if (bsStep.targetGrid) { $row.attr('data-target-grid', bsStep.targetGrid); }
+        $gridInput.appendTo($row);
+
+        // Scan sub-row: find safe cells (outside watch areas) near an enemy building
+        var $scanSub = $('<div>').css({
+            'flex-basis': '100%', 'width': '100%',
+            'border-top': '1px solid #555', 'padding-top': '4px', 'margin-top': '2px',
+            'display': 'flex', 'align-items': 'center', 'gap': '4px', 'flex-wrap': 'wrap'
+        });
+        $('<span>').css({ 'color': '#aaa', 'font-size': '11px' }).text('Enemy grid:').appendTo($scanSub);
+        var $mtgEnemyInput = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
+                            'placeholder': 'e.g. 1570' })
+            .css({ 'width': '90px', 'height': '28px', 'font-size': '13px' })
+            .val(bsStep.scanEnemy || '').appendTo($scanSub);
+        var $mtgScanBtn = $('<button>').text('Scan safe').attr('class', 'btn btn-xs btn-default')
+            .css({ 'flex-shrink': '0', 'font-size': '11px', 'height': '28px' }).appendTo($scanSub);
+        $('<span>').css({ 'color': '#aaa', 'font-size': '10px', 'margin-left': '2px' }).text('watch r:').appendTo($scanSub);
+        var $mtgWatchR = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
+                            'min': '1', 'max': '20', 'placeholder': '6' })
+            .css({ 'width': '42px', 'height': '28px', 'font-size': '13px' })
+            .val(bsStep.scanWatchR || 6).appendTo($scanSub);
+        $('<span>').css({ 'color': '#aaa', 'font-size': '10px' }).text('search r:').appendTo($scanSub);
+        var $mtgSearchR = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
+                            'min': '1', 'max': '40', 'placeholder': '15' })
+            .css({ 'width': '42px', 'height': '28px', 'font-size': '13px' })
+            .val(bsStep.scanSearchR || 15).appendTo($scanSub);
+        var $mtgGridSel = $('<select>').attr('class', 'form-control input-xs')
+            .css({ 'width': '240px', 'height': '28px', 'font-size': '12px' });
+        if (bsStep.targetGrid) {
+            var _svX = bsStep.targetGrid % _mtgW, _svY = Math.floor(bsStep.targetGrid / _mtgW);
+            $('<option>').val(bsStep.targetGrid).text('x:' + _svX + ' y:' + _svY + ' G:' + bsStep.targetGrid + ' (saved)').prop('selected', true).appendTo($mtgGridSel);
+        } else {
+            $('<option>').val('').text('\u2014 click Scan safe \u2014').appendTo($mtgGridSel);
+        }
+        $mtgGridSel.on('change', function () {
+            var v = parseInt($(this).val(), 10) || '';
+            $gridInput.val(v).trigger('change');
+        });
+        $mtgGridSel.appendTo($scanSub);
+
+        // Show on map button
+        var $mtgShowBtn = $('<button>').text('\uD83D\uDCCD').attr('class', 'btn btn-xs btn-default')
+            .css({ 'flex-shrink': '0', 'font-size': '12px', 'padding': '2px 6px', 'height': '28px' })
+            .attr('title', 'Scroll map to selected cell');
+        $mtgShowBtn.on('click', function () {
+            var showG = parseInt($mtgGridSel.val(), 10) || parseInt($gridInput.val(), 10);
+            if (showG > 0) {
+                try { game.zone.ScrollToGrid(showG); } catch (e) {}
+                game.chatMessage('Showing grid:' + showG + ' on map', 'adventurer');
+            }
+        });
+        $mtgShowBtn.appendTo($scanSub);
+
+        // Scan logic — finds free cells outside all enemy watch areas
+        $mtgScanBtn.on('click', function () {
+            var enemyG = parseInt($mtgEnemyInput.val(), 10);
+            if (!enemyG || enemyG < 1) {
+                $mtgGridSel.empty();
+                $('<option>').val('').text('\u2014 enter an enemy grid \u2014').appendTo($mtgGridSel);
+                return;
+            }
+            $mtgGridSel.empty();
+            $('<option>').val('').text('scanning\u2026').appendTo($mtgGridSel);
+            $row.attr('data-scan-enemy', enemyG);
+
+            // Resolve map width
+            var w = _mtgW;
+
+            var WATCH_R  = parseInt($mtgWatchR.val(), 10) || 6;
+            var SEARCH_R = parseInt($mtgSearchR.val(), 10) || 15;
+
+            var enemyRow = Math.floor(enemyG / w), enemyCol = enemyG % w;
+
+            // Collect ALL enemy building grids (for watch area check)
+            var enemyGrids = [];
+            try {
+                game.zone.mStreetDataMap.GetBuildings_vector().forEach(function (b) {
+                    if (!b) { return; }
+                    try {
+                        if (b.IsReadyToIntercept == null) { return; } // not a combat building
+                        var bg = typeof b.GetGrid === 'function' ? b.GetGrid() : 0;
+                        if (bg > 0) { enemyGrids.push({ g: bg, r: Math.floor(bg / w), c: bg % w }); }
+                    } catch (e) {}
+                });
+            } catch (e) {}
+
+            game.chatMessage('SCAN: enemy=' + enemyG + ' watchR=' + WATCH_R + ' searchR=' + SEARCH_R + ' enemies=' + enemyGrids.length, 'adventurer');
+
+            // Get pathfinder origin from the enemy building
+            var pathOrigin = -1;
+            try {
+                var refBld = game.zone.mStreetDataMap.GetBuildingByGridPos(enemyG);
+                if (!refBld) { refBld = game.zone.GetBuildingFromGridPosition(enemyG); }
+                if (refBld) { pathOrigin = refBld.GetStreetGridEntry(); }
+            } catch (e) {}
+            if (pathOrigin < 0) { pathOrigin = enemyG; }
+
+            function isCellFree(g) {
+                try { return !game.zone.GetBuildingFromGridPosition(g); } catch (e) {}
+                return false;
+            }
+
+            function isReachable(g) {
+                try {
+                    var path = game.gi.mPathFinder.CalculatePath(pathOrigin, g, null, true);
+                    return path && path.pathLenX10000 > 0;
+                } catch (e) {}
+                return false;
+            }
+
+            // Chebyshev distance: max(|dr|, |dc|) — matches the diamond-shaped watch areas
+            function minEnemyDist(cr, cc) {
+                var minD = 9999;
+                for (var ei = 0; ei < enemyGrids.length; ei++) {
+                    var d = Math.max(Math.abs(cr - enemyGrids[ei].r), Math.abs(cc - enemyGrids[ei].c));
+                    if (d < minD) { minD = d; }
+                }
+                return minD;
+            }
+
+            var results = [];
+            for (var dr = -SEARCH_R; dr <= SEARCH_R; dr++) {
+                for (var dc = -SEARCH_R; dc <= SEARCH_R; dc++) {
+                    var cr = enemyRow + dr, cc = enemyCol + dc;
+                    if (cr < 1 || cc < 1 || cc >= w - 1) { continue; }
+                    var g = cr * w + cc;
+                    // Must be outside ALL enemy watch areas
+                    var eDist = minEnemyDist(cr, cc);
+                    if (eDist < WATCH_R) { continue; }
+                    // Check 3x3 area has no buildings
+                    var allFree = true;
+                    for (var ar = -1; ar <= 1 && allFree; ar++) {
+                        for (var ac = -1; ac <= 1 && allFree; ac++) {
+                            if (!isCellFree((cr + ar) * w + (cc + ac))) { allFree = false; }
+                        }
+                    }
+                    if (!allFree) { continue; }
+                    // Verify reachable (not water/mountains)
+                    if (!isReachable(g)) { continue; }
+                    var distToTarget = Math.abs(dr) + Math.abs(dc);
+                    results.push({ grid: g, row: cr, col: cc, dist: distToTarget, eDist: eDist });
+                }
+            }
+            results.sort(function (a, b) { return a.dist - b.dist; });
+
+            $mtgGridSel.empty();
+            $('<option>').val('').text('\u2014 ' + results.length + ' safe cells (watchR=' + WATCH_R + ') \u2014').appendTo($mtgGridSel);
+            var shown = Math.min(results.length, 50);
+            for (var i = 0; i < shown; i++) {
+                var sr = results[i];
+                $('<option>').val(sr.grid)
+                    .text('x:' + sr.col + ' y:' + sr.row + ' G:' + sr.grid + '  d=' + sr.dist + ' (safe ' + sr.eDist + ')')
+                    .appendTo($mtgGridSel);
+            }
+            if (results.length === 0) {
+                $('<option>').val('').text('no safe cells found \u2014 try larger search r or smaller watch r').appendTo($mtgGridSel);
+            }
+            game.chatMessage('SCAN: found ' + results.length + ' safe cells outside watch areas', 'adventurer');
+        });
+
+        $row.append($scanSub);
+        if (bsStep.scanEnemy) { $row.attr('data-scan-enemy', bsStep.scanEnemy); }
+    }
+
     // CLAIM_QUESTS: pause-and-wait seconds input
     if (bsStep.type === 'CLAIM_QUESTS') {
         var $cqSub = $('<div>').css({
@@ -2664,7 +2937,8 @@ function _qrBsUpdateStepProgress(idx, steps) {
         WAIT_IDLE: 'WAIT \u2014 idle',        UNLOAD: 'UNLOAD army',
         LOAD_ARMY: 'LOAD ARMY',               DELAY: 'DELAY',
         COLLECTIBLES: 'COLLECT',              FILL_AND_RETURN: 'FILL \u2192 STAR',
-        CLAIM_QUESTS: 'CLAIM QUEST REWARDS',  TRANSFER_TO_ENEMY_GARRISON: 'TRANSFER \u2192 near enemy'
+        CLAIM_QUESTS: 'CLAIM QUEST REWARDS',  TRANSFER_TO_ENEMY_GARRISON: 'TRANSFER \u2192 near enemy',
+        MOVE_TO_GRID: 'MOVE \u2192 grid'
     };
     function fmt(i) {
         if (i < 0 || i >= steps.length) { return null; }
@@ -2675,6 +2949,9 @@ function _qrBsUpdateStepProgress(idx, steps) {
             text += ' @ ' + s.buildingDisplay;
         }
         if (s.type === 'TRANSFER_TO_ENEMY_GARRISON' && s.targetGrid) {
+            text += ' (grid:' + s.targetGrid + ')';
+        }
+        if (s.type === 'MOVE_TO_GRID' && s.targetGrid) {
             text += ' (grid:' + s.targetGrid + ')';
         }
         if (s.type === 'DELAY') { text += ' (' + (s.seconds || 5) + 's)'; }
@@ -3354,7 +3631,7 @@ function _qrRunBattleScript(startIdx) {
                 case 'FILL_AND_RETURN': {
                     game.chatMessage('FILL_AND_RETURN: filling all profile generals then returning to star...', 'adventurer');
                     try {
-                        // Collect unique general UIDs from all steps (first occurrence order)
+                        // Collect unique general UIDs from all battle script steps (appearance order)
                         var frUIDs = [];
                         var frSeen = {};
                         state.steps.forEach(function (s) {
@@ -3369,7 +3646,7 @@ function _qrRunBattleScript(startIdx) {
                             break;
                         }
 
-                        // Get manually-set capacity for a UID (generalCapacity field), no API fallback
+                        // Get manually-set capacity for a UID (generalCapacity field in the generals tab)
                         function frGetCap(uid) {
                             var cap = 0;
                             (state.profile.steps || []).some(function (s) {
@@ -3379,72 +3656,91 @@ function _qrRunBattleScript(startIdx) {
                             return cap || 200;
                         }
 
-                        // Sort highest capacity first so big generals get first pick of the live pool
-                        frUIDs.sort(function (a, b) { return frGetCap(b) - frGetCap(a); });
+                        // Names resolved at unload time so they're available during load/send-home
+                        var frNames = {};
 
-                        var frIdx = 0;
-
-                        function frProcessNext() {
+                        // ── PHASE 1: Unload ALL generals one by one ──
+                        var frUnloadIdx = 0;
+                        function frUnloadNext() {
                             if (state.stopped) { return; }
-                            if (frIdx >= frUIDs.length) {
-                                game.chatMessage('FILL_AND_RETURN: all generals processed and sent home.', 'adventurer');
-                                setTimeout(runNextStep, 1000);
+                            if (frUnloadIdx >= frUIDs.length) {
+                                // All unloaded — wait 2s for server to credit all units back to the pool
+                                game.chatMessage('FILL_AND_RETURN: all generals unloaded — pool settling...', 'adventurer');
+                                setTimeout(frBeginLoading, 2000);
                                 return;
                             }
-                            var uid = frUIDs[frIdx++];
+                            var uid = frUIDs[frUnloadIdx++];
                             var spec = _qrFindSpecByUID(uid);
                             if (!spec) {
-                                game.chatMessage('FILL_AND_RETURN: general not found — skipping.', 'adventurer');
-                                frProcessNext();
+                                game.chatMessage('FILL_AND_RETURN: general not found at unload — skipping.', 'adventurer');
+                                setTimeout(frUnloadNext, 500);
                                 return;
                             }
-                            var frGenName = '';
-                            try { frGenName = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
-                            var frMaxCap = frGetCap(uid);
+                            var name = '';
+                            try { name = spec.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
+                            frNames[uid] = name;
 
-                            game.chatMessage('FILL_AND_RETURN: unloading ' + frGenName + ' (cap ' + frMaxCap + ')...', 'adventurer');
+                            if (!spec.HasUnits || !spec.HasUnits()) {
+                                game.chatMessage('FILL_AND_RETURN: ' + name + ' — already empty.', 'adventurer');
+                                setTimeout(frUnloadNext, 500);
+                                return;
+                            }
 
-                            // Step 1: Unload general
+                            game.chatMessage('FILL_AND_RETURN: unloading ' + name + '...', 'adventurer');
                             try {
                                 var frUnload = new dRaiseArmyVODef();
                                 frUnload.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
                                 game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, frUnload, armyResponder);
                             } catch (e) {
-                                game.chatMessage('FILL_AND_RETURN: unload error for ' + frGenName + ': ' + e, 'adventurer');
-                                setTimeout(frProcessNext, 1000);
+                                game.chatMessage('FILL_AND_RETURN: unload error for ' + name + ': ' + e, 'adventurer');
+                                setTimeout(frUnloadNext, 1000);
                                 return;
                             }
-
-                            // Step 2: Poll until unload confirmed (HasUnits = false), timeout 30s
-                            var frUnloadTicks = 0;
-                            var ivFrUnload = setInterval(function () {
-                                if (state.stopped) { clearInterval(ivFrUnload); return; }
-                                frUnloadTicks++;
+                            // Poll until HasUnits = false (up to 30s)
+                            var frUTicks = 0;
+                            var ivFrU = setInterval(function () {
+                                if (state.stopped) { clearInterval(ivFrU); return; }
+                                frUTicks++;
                                 var s2 = _qrFindSpecByUID(uid);
                                 var stillHas = false;
                                 try { stillHas = s2 && s2.HasUnits && s2.HasUnits(); } catch (e) {}
-                                if (!stillHas || frUnloadTicks > 15) { // 15 × 2s = 30s
-                                    clearInterval(ivFrUnload);
-                                    if (stillHas) {
-                                        game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' unload timeout — continuing anyway.', 'adventurer');
-                                    }
-                                    frDoLoad(uid, frGenName, frMaxCap);
+                                if (!stillHas || frUTicks > 15) {
+                                    clearInterval(ivFrU);
+                                    if (stillHas) { game.chatMessage('FILL_AND_RETURN: ' + name + ' unload timeout.', 'adventurer'); }
+                                    frUnloadNext();
                                 }
                             }, 2000);
                         }
 
-                        function frDoLoad(uid, frGenName, frMaxCap) {
+                        // ── PHASE 2: Load and send home one by one (highest capacity first) ──
+                        var frLoadUIDs = frUIDs.slice().sort(function (a, b) { return frGetCap(b) - frGetCap(a); });
+                        var frLoadIdx = 0;
+
+                        function frBeginLoading() {
                             if (state.stopped) { return; }
+                            frLoadNext();
+                        }
+
+                        function frLoadNext() {
+                            if (state.stopped) { return; }
+                            if (frLoadIdx >= frLoadUIDs.length) {
+                                game.chatMessage('FILL_AND_RETURN: all generals filled and sent home.', 'adventurer');
+                                setTimeout(runNextStep, 1000);
+                                return;
+                            }
+                            var uid = frLoadUIDs[frLoadIdx++];
+                            var name = frNames[uid] || uid;
+                            var maxCap = frGetCap(uid);
+
                             var spec = _qrFindSpecByUID(uid);
                             if (!spec) {
-                                game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' not found for load.', 'adventurer');
-                                setTimeout(frProcessNext, 1000);
+                                game.chatMessage('FILL_AND_RETURN: ' + name + ' — not found at load, skipping.', 'adventurer');
+                                setTimeout(frLoadNext, 500);
                                 return;
                             }
 
-                            // Read LIVE free pool from zone army (units returned after unload are now here)
-                            var frArmy = {};
-                            var frTotal = 0;
+                            // Read the live free pool
+                            var frArmy = {}, frTotal = 0;
                             try {
                                 var livePool = {};
                                 game.zone.GetArmy(game.gi.mCurrentPlayer.GetPlayerId())
@@ -3456,28 +3752,26 @@ function _qrRunBattleScript(startIdx) {
                                             livePool[t] = (livePool[t] || 0) + amt;
                                         }
                                     });
-                                // Fill using _qrUnitOrder priority up to capacity
                                 _qrUnitOrder.forEach(function (t) {
-                                    if (frTotal >= frMaxCap) { return; }
+                                    if (frTotal >= maxCap) { return; }
                                     var avail = livePool[t] || 0;
                                     if (avail <= 0) { return; }
-                                    var take = Math.min(avail, frMaxCap - frTotal);
+                                    var take = Math.min(avail, maxCap - frTotal);
                                     frArmy[t] = take;
                                     frTotal += take;
                                 });
                             } catch (e) {
-                                game.chatMessage('FILL_AND_RETURN: pool read error for ' + frGenName + ': ' + e, 'adventurer');
+                                game.chatMessage('FILL_AND_RETURN: pool read error for ' + name + ': ' + e, 'adventurer');
                             }
 
                             var frUnitTypes = Object.keys(frArmy).filter(function (t) { return frArmy[t] > 0; });
                             if (frUnitTypes.length === 0) {
-                                game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' — pool empty, sending home empty.', 'adventurer');
-                                frSendHome(uid, frGenName);
+                                game.chatMessage('FILL_AND_RETURN: ' + name + ' — pool empty, sending home empty.', 'adventurer');
+                                frSendHome(uid, name);
                                 return;
                             }
 
-                            game.chatMessage('FILL_AND_RETURN: loading ' + frGenName + ' with ' + frTotal + '/' + frMaxCap + ' units...', 'adventurer');
-
+                            game.chatMessage('FILL_AND_RETURN: loading ' + name + ' with ' + frTotal + '/' + maxCap + ' units...', 'adventurer');
                             try {
                                 var frLoad = new dRaiseArmyVODef();
                                 frLoad.armyHolderSpecialistVO = spec.CreateSpecialistVOFromSpecialist();
@@ -3489,16 +3783,16 @@ function _qrRunBattleScript(startIdx) {
                                 });
                                 game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, frLoad, armyResponder);
                             } catch (e) {
-                                game.chatMessage('FILL_AND_RETURN: load error for ' + frGenName + ': ' + e, 'adventurer');
-                                frSendHome(uid, frGenName);
+                                game.chatMessage('FILL_AND_RETURN: load error for ' + name + ': ' + e, 'adventurer');
+                                frSendHome(uid, name);
                                 return;
                             }
 
-                            // Step 3: Poll until army confirmed on general, timeout 30s
-                            var frLoadTicks = 0;
-                            var ivFrLoad = setInterval(function () {
-                                if (state.stopped) { clearInterval(ivFrLoad); return; }
-                                frLoadTicks++;
+                            // Poll until army confirmed on general, timeout 30s
+                            var frLTicks = 0;
+                            var ivFrL = setInterval(function () {
+                                if (state.stopped) { clearInterval(ivFrL); return; }
+                                frLTicks++;
                                 var liveLoaded = 0;
                                 try {
                                     var s3 = _qrFindSpecByUID(uid);
@@ -3506,9 +3800,8 @@ function _qrRunBattleScript(startIdx) {
                                         liveLoaded += sq.GetAmount ? sq.GetAmount() : 0;
                                     });
                                 } catch (e) {}
-                                if (liveLoaded >= frTotal || frLoadTicks > 15) { // 15 × 2s = 30s
-                                    clearInterval(ivFrLoad);
-                                    // Before sending home: check if general is underfilled with free units still available
+                                if (liveLoaded >= frTotal || frLTicks > 15) {
+                                    clearInterval(ivFrL);
                                     var freeLeft = 0;
                                     try {
                                         game.zone.GetArmy(game.gi.mCurrentPlayer.GetPlayerId())
@@ -3519,31 +3812,36 @@ function _qrRunBattleScript(startIdx) {
                                                 }
                                             });
                                     } catch (e) {}
-                                    if (liveLoaded < frMaxCap && freeLeft > 0) {
-                                        game.chatMessage('FILL_AND_RETURN: WARNING — ' + frGenName + ' has ' + liveLoaded + '/' + frMaxCap + ' but ' + freeLeft + ' units still unassigned!', 'adventurer');
+                                    if (liveLoaded < maxCap && freeLeft > 0) {
+                                        game.chatMessage('FILL_AND_RETURN: WARNING \u2014 ' + name + ' has ' + liveLoaded + '/' + maxCap + ' but ' + freeLeft + ' units still in pool!', 'adventurer');
+                                    } else if (liveLoaded === 0 && freeLeft === 0) {
+                                        // Pool consumed, client state didn't update — server likely accepted it
+                                        game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2014 load accepted server-side (' + frTotal + ' units sent) \u2713', 'adventurer');
                                     } else {
-                                        game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' confirmed ' + liveLoaded + '/' + frMaxCap + ' \u2713', 'adventurer');
+                                        game.chatMessage('FILL_AND_RETURN: ' + name + ' confirmed ' + liveLoaded + '/' + maxCap + ' \u2713', 'adventurer');
                                     }
-                                    frSendHome(uid, frGenName);
+                                    frSendHome(uid, name);
                                 }
                             }, 2000);
                         }
 
-                        function frSendHome(uid, frGenName) {
+                        function frSendHome(uid, name) {
                             if (state.stopped) { return; }
                             try {
                                 var spec = _qrFindSpecByUID(uid);
                                 if (spec) {
                                     armyServices.specialist.sendToZone(spec, game.gi.mCurrentPlayer.GetHomeZoneId());
-                                    game.chatMessage('FILL_AND_RETURN: ' + frGenName + ' \u2192 sent home.', 'adventurer');
+                                    game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2192 sent home.', 'adventurer');
+                                } else {
+                                    game.chatMessage('FILL_AND_RETURN: ' + name + ' \u2014 not found for send-home (already left?).', 'adventurer');
                                 }
                             } catch (e) {
-                                game.chatMessage('FILL_AND_RETURN: send-home error for ' + frGenName + ': ' + e, 'adventurer');
+                                game.chatMessage('FILL_AND_RETURN: send-home error for ' + name + ': ' + e, 'adventurer');
                             }
-                            setTimeout(frProcessNext, 1500);
+                            setTimeout(frLoadNext, 1500);
                         }
 
-                        frProcessNext();
+                        frUnloadNext();
                     } catch (e) { game.chatMessage('FILL_AND_RETURN error: ' + e, 'adventurer'); setTimeout(runNextStep, 1000); }
                     break;
                 }
@@ -3735,6 +4033,48 @@ function _qrRunBattleScript(startIdx) {
 
                     game.chatMessage('COLLECT_ALL: starting collect + quest loop\u2026', 'adventurer');
                     caqLoop();
+                    break;
+                }
+
+                case 'MOVE_TO_GRID': {
+                    var mtgGrid = (step.targetGrid && step.targetGrid > 0) ? step.targetGrid : 0;
+                    if (!mtgGrid) { game.chatMessage('MOVE_TO_GRID: no grid number set — skipping.', 'adventurer'); setTimeout(runNextStep, 500); break; }
+                    if (!spec)   { game.chatMessage('MOVE_TO_GRID: general not found — skipping.', 'adventurer'); setTimeout(runNextStep, 500); break; }
+                    var mtgGenUID  = step.generalUID;
+                    var mtgGenName = genName;
+                    // Already there?
+                    if (spec.GetGarrisonGridIdx && spec.GetGarrisonGridIdx() === mtgGrid) {
+                        game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' already at grid:' + mtgGrid + ' — skipping.', 'adventurer');
+                        setTimeout(runNextStep, 1000); break;
+                    }
+                    var mtgOrigGrid = spec.GetGarrisonGridIdx ? spec.GetGarrisonGridIdx() : 0;
+                    var mtgTask = new armySpecTaskDef();
+                    mtgTask.uniqueID  = spec.GetUniqueID();
+                    mtgTask.subTaskID = 0;
+                    game.gi.mCurrentCursor.mCurrentSpecialist = spec;
+                    game.gi.SendServerAction(95, 4, mtgGrid, 0, mtgTask);
+                    game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' \u2192 grid:' + mtgGrid, 'adventurer');
+                    // Poll until general has left original position
+                    setTimeout(function () {
+                        var mtgTick = 0;
+                        var mtgIv = setInterval(function () {
+                            if (state.stopped) { clearInterval(mtgIv); return; }
+                            mtgTick++;
+                            if (mtgTick > 15) {
+                                clearInterval(mtgIv);
+                                game.chatMessage('MOVE_TO_GRID: timeout — ' + mtgGenName + ' did not move (grid may be blocked).', 'adventurer');
+                                setTimeout(runNextStep, 1000); return;
+                            }
+                            try {
+                                var s = _qrFindSpecByUID(mtgGenUID);
+                                if (s && s.GetGarrisonGridIdx() !== mtgOrigGrid) {
+                                    clearInterval(mtgIv);
+                                    game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' is moving to grid:' + mtgGrid, 'adventurer');
+                                    setTimeout(runNextStep, 1000);
+                                }
+                            } catch (e) { clearInterval(mtgIv); finish('MOVE_TO_GRID error: ' + e); }
+                        }, 2000);
+                    }, 2000);
                     break;
                 }
 

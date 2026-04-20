@@ -1,4 +1,16 @@
 {
+   "user_quick_actions.js":{
+      "name":"Quick Actions",
+      "shortDesc":"One-click multi-step production sequences",
+      "longDesc":"Automates common production sequences. Currently: orders Retired Bandits in the Provision House (based on available Bread) then orders Recruits in the Barracks (based on Settlers + Bronze Swords). Accessible via Tools > Quick Actions.",
+      "author":"custom"
+   },
+   "user_expedition_runner.js":{
+      "name":"Expedition Runner",
+      "shortDesc":"Automate expedition marshal attacks",
+      "longDesc":"Automates multi-wave expedition attacks. Configure a marshal, a target camp, and an army composition per wave. The script loads each wave's army, sends the attack, and pre-loads the next wave while the marshal is in battle. Accessible via Tools > Expedition Runner.",
+      "author":"custom"
+   },
    "user_building_status.js":{
       "name":"Building Status",
       "shortDesc":"Building status and time left",
