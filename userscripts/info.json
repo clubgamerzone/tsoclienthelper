@@ -1,4 +1,10 @@
 {
+   "user_coop_adventure.js":{
+      "name":"Co-op Adventure",
+      "shortDesc":"Auto-accept adventure invitations and apply buffs",
+      "longDesc":"Runs in the background watching for adventure invitations. When one is detected, automatically travels to the adventure zone, applies the selected zone buff, and returns home. Accessible via Tools > Co-op Adventure.",
+      "author":"custom"
+   },
    "user_quick_actions.js":{
       "name":"Quick Actions",
       "shortDesc":"One-click multi-step production sequences",

@@ -2197,6 +2197,101 @@ function _qrValidate(profile) {
     return errors;
 }
 
+// ---- Send co-op invitations to friends listed in the profile ----
+function _qrSendCoopInvites(profile, zoneId, callback) {
+    var coop = profile.coop || {};
+    if (!coop.enabled || !coop.friends || coop.friends.length === 0) {
+        callback();
+        return;
+    }
+
+    // Find the adventure VO for this zone
+    var advVO = null;
+    try {
+        var AdvManager = swmmo.getDefinitionByName("com.bluebyte.tso.adventure.logic::AdventureManager").getInstance();
+        AdvManager.getAdventures().forEach(function (adv) {
+            if (adv.zoneID === zoneId || adv.adventureName === profile.adventureNameKey) { advVO = adv; }
+        });
+    } catch (e) {
+        game.chatMessage('Adventurer: co-op error getting adventure: ' + e, 'adventurer');
+    }
+    if (!advVO) {
+        game.chatMessage('Adventurer: co-op — adventure VO not found, skipping invites.', 'adventurer');
+        callback();
+        return;
+    }
+
+    // Get friends list from Flash to get the actual dPlayerListItemVO objects
+    var flashFriends = [];
+    try {
+        var fl = globalFlash.gui.mFriendsList;
+        var all = fl.GetFilteredFriends('', true) || [];
+        all.forEach(function (f) { if (f && f.username) { flashFriends.push(f); } });
+        var gm = fl.GetFilteredGuildMembers ? fl.GetFilteredGuildMembers('', true) : [];
+        if (!gm || !gm.length) { gm = fl.GetGuildMembers ? fl.GetGuildMembers() : []; }
+        (gm || []).forEach(function (m) {
+            if (m && m.username) {
+                var dup = false;
+                flashFriends.forEach(function (f) { if (f.id === m.id) { dup = true; } });
+                if (!dup) { flashFriends.push(m); }
+            }
+        });
+    } catch (e) {
+        game.chatMessage('Adventurer: co-op error getting friends: ' + e, 'adventurer');
+        callback();
+        return;
+    }
+
+    // Set adventure data on the panel
+    try {
+        globalFlash.gui.mAdventurePanel.SetData(advVO);
+    } catch (e) {
+        game.chatMessage('Adventurer: co-op SetData error: ' + e, 'adventurer');
+        callback();
+        return;
+    }
+
+    // Send invitations one by one with a small delay between them
+    var inviteQueue = [];
+    coop.friends.forEach(function (f) {
+        if (!f.username) return;
+        var friendVO = null;
+        flashFriends.forEach(function (ff) {
+            if (ff.username === f.username) { friendVO = ff; }
+        });
+        if (friendVO) {
+            inviteQueue.push({ name: f.username, vo: friendVO });
+        } else {
+            game.chatMessage('Adventurer: co-op — friend "' + f.username + '" not found in friends/guild list, skipping.', 'adventurer');
+        }
+    });
+
+    if (inviteQueue.length === 0) {
+        game.chatMessage('Adventurer: co-op — no valid friends to invite.', 'adventurer');
+        callback();
+        return;
+    }
+
+    var idx = 0;
+    function sendNext() {
+        if (idx >= inviteQueue.length) {
+            game.chatMessage('Adventurer: co-op — all ' + inviteQueue.length + ' invitation(s) sent \u2713', 'adventurer');
+            callback();
+            return;
+        }
+        var invite = inviteQueue[idx];
+        idx++;
+        try {
+            globalFlash.gui.mAdventurePanel.AddInvitedPlayer(invite.vo);
+            game.chatMessage('Adventurer: co-op — invited ' + invite.name + ' \u2713', 'adventurer');
+        } catch (e) {
+            game.chatMessage('Adventurer: co-op — error inviting ' + invite.name + ': ' + e, 'adventurer');
+        }
+        setTimeout(sendNext, 1500);
+    }
+    sendNext();
+}
+
 // ---- Run profile ----
 function _qrRun() {
     if (_qrRunning) { return; }
@@ -2327,8 +2422,12 @@ function _qrRun() {
             if (found) {
                 clearInterval(ivZone);
                 profileZoneId = found;
-                game.chatMessage('Adventurer: zone confirmed \u2713 \u2014 dispatching generals\u2026', 'adventurer');
-                doDispatch();
+                game.chatMessage('Adventurer: zone confirmed \u2713', 'adventurer');
+                // Send co-op invitations before dispatching generals
+                _qrSendCoopInvites(profile, profileZoneId, function () {
+                    game.chatMessage('Adventurer: dispatching generals\u2026', 'adventurer');
+                    doDispatch();
+                });
             } else if (pollTicks > 30) { // 30 \u00d7 2s = 60s
                 clearInterval(ivZone);
                 abortRun('Adventure zone not confirmed after 60s \u2014 check the adventure was placed and try again.');
