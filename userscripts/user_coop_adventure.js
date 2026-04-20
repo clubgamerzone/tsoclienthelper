@@ -11,119 +11,18 @@ try { addToolsMenuItem('CA Test Click', _caTestClick); } catch (e) {}
 // ---- Test click dispatcher (without needing window) ----
 function _caTestClick() {
     try {
-        var mw = globalFlash.gui.mMailWindow;
-        var panel = mw.getMPanel();
-        var btn = panel.btnAdventureInviteAccept;
-
-        // --- Approach 1: introspect contentAdventureInvite panel for methods/data ---
-        var invPanel = panel.contentAdventureInvite;
-        if (invPanel) {
-            // Dump all methods on the panel to find an accept-like method
-            try {
-                var xml = window.runtime.flash.utils.describeType(invPanel);
-                var doc = new DOMParser().parseFromString(xml, 'text/xml');
-                var meths = doc.querySelectorAll('method');
-                var methodNames = [];
-                for (var mi = 0; mi < meths.length; mi++) {
-                    methodNames.push(meths[mi].getAttribute('name'));
-                }
-                game.chatMessage('Co-op TEST: InvPanel methods: ' + methodNames.join(', '), 'adventurer');
-
-                // Try any accept/click-like method
-                var tryMethods = ['acceptAdventure', 'onAccept', 'clickAccept', 'accept', 'joinAdventure', 'onBtnAcceptClick', 'handleAccept'];
-                for (var ti = 0; ti < tryMethods.length; ti++) {
-                    if (typeof invPanel[tryMethods[ti]] === 'function') {
-                        game.chatMessage('Co-op TEST: Calling invPanel.' + tryMethods[ti] + '()', 'adventurer');
-                        try { invPanel[tryMethods[ti]](); } catch(e) { game.chatMessage('  err: ' + e, 'adventurer'); }
-                    }
-                }
-
-                // Also look for a data/adventure object on the panel
-                var vars = doc.querySelectorAll('variable,accessor');
-                var dataProps = [];
-                for (var vi = 0; vi < vars.length; vi++) {
-                    var vn = vars[vi].getAttribute('name');
-                    if (/zone|adv|data|mail|invite|id/i.test(vn)) {
-                        var vv = '';
-                        try { vv = invPanel[vn]; } catch(e) { vv = 'ERR'; }
-                        dataProps.push(vn + '=' + vv);
-                    }
-                }
-                game.chatMessage('Co-op TEST: InvPanel data props: ' + (dataProps.join(', ') || 'none'), 'adventurer');
-            } catch(e) {
-                game.chatMessage('Co-op TEST: invPanel introspect err: ' + e, 'adventurer');
-            }
-        } else {
-            game.chatMessage('Co-op TEST: contentAdventureInvite not found', 'adventurer');
-        }
-
-        // --- Approach 2: get zone ID from selected mail and call AdvManager directly ---
-        try {
-            var list = panel.mailsList;
-            var mail = list ? list.selectedItem : null;
-            if (!mail) {
-                // try dataProvider
-                var dp = panel.mailsList.dataProvider;
-                for (var i = 0; i < dp.length; i++) {
-                    var m = dp.getItemAt ? dp.getItemAt(i) : dp[i];
-                    if (m && m.type === 23) { mail = m; break; }
-                }
-            }
-            if (mail) {
-                game.chatMessage('Co-op TEST: Selected mail type=' + mail.type + ' id=' + mail.id + ' sender=' + mail.senderName, 'adventurer');
-
-                // Dump all properties of the mail to find zoneID
-                var mxml = window.runtime.flash.utils.describeType(mail);
-                var mdoc = new DOMParser().parseFromString(mxml, 'text/xml');
-                var mvars = mdoc.querySelectorAll('variable,accessor');
-                var mprops = [];
-                for (var mvi = 0; mvi < mvars.length; mvi++) {
-                    var mvn = mvars[mvi].getAttribute('name');
-                    var mvv = '';
-                    try { mvv = mail[mvn]; } catch(e) { mvv = 'ERR'; }
-                    mprops.push(mvn + '=' + mvv);
-                }
-                game.chatMessage('Co-op TEST: Mail props: ' + mprops.join(', '), 'adventurer');
-
-                // Now find the matching adventure in AdventureManager
-                var AdvManager = swmmo.getDefinitionByName("com.bluebyte.tso.adventure.logic::AdventureManager").getInstance();
-                var advs = AdvManager.getAdventures();
-                var myId = game.gi.mCurrentPlayer.GetPlayerId();
-                var foundAdv = null;
-                for (var ai = 0; ai < advs.length; ai++) {
-                    var adv = advs[ai];
-                    if (adv.ownerPlayerID !== myId) {
-                        game.chatMessage('Co-op TEST: Non-owned adv: zone=' + adv.zoneID + ' name=' + adv.adventureName + ' owner=' + adv.ownerPlayerID, 'adventurer');
-                        if (!foundAdv) foundAdv = adv;
-                    }
-                }
-
-                if (foundAdv) {
-                    game.chatMessage('Co-op TEST: Calling AdvManager.setAdventureState(' + foundAdv.zoneID + ', 1)...', 'adventurer');
-                    var result = AdvManager.setAdventureState(foundAdv.zoneID, 1);
-                    game.chatMessage('Co-op TEST: setAdventureState result=' + result, 'adventurer');
-                } else {
-                    game.chatMessage('Co-op TEST: No non-owned adventure found in AdvManager', 'adventurer');
-                }
-            } else {
-                game.chatMessage('Co-op TEST: No mail selected or no type-23 mail found', 'adventurer');
-            }
-        } catch(e) {
-            game.chatMessage('Co-op TEST: AdvManager approach err: ' + e, 'adventurer');
-        }
-
-        // --- Approach 3: direct button dispatch as fallback ---
-        if (btn && btn.enabled) {
-            var ME = window.runtime.flash.events.MouseEvent;
-            var cx = btn.width / 2, cy = btn.height / 2;
-            btn.dispatchEvent(new ME('mouseDown', true, false, cx, cy, null, false, false, false, true));
-            btn.dispatchEvent(new ME('mouseUp', true, false, cx, cy));
-            btn.dispatchEvent(new ME('click', true, false, cx, cy));
-            game.chatMessage('Co-op TEST: Button direct click dispatched', 'adventurer');
-        }
-
-    } catch (e) {
-        game.chatMessage('Co-op TEST ERROR: ' + e, 'adventurer');
+        // Dump star menu item types to find arrow internal names
+        var types = [];
+        game.gi.mCurrentPlayer.mAvailableBuffs_vector.forEach(function(item) {
+            var type = '', res = '', amt = 0;
+            try { type = item.GetType(); } catch(e) { return; }
+            try { res  = item.GetResourceName_string(); } catch(e) {}
+            try { amt  = item.GetAmount(); } catch(e) {}
+            types.push(type + (res ? '|' + res : '') + ' x' + amt);
+        });
+        game.chatMessage('CA types (' + types.length + '): ' + types.join(' / '), 'adventurer');
+    } catch(e) {
+        game.chatMessage('CA TEST ERR: ' + e, 'adventurer');
     }
 }
 
@@ -172,6 +71,13 @@ function _caGetAllAdventures() {
     } catch (e) { _caLog('ERR getAllAdvs: ' + e); }
     return all;
 }
+
+// ---- Module-level state ----
+var _caRunning = false;
+var _caState = null;
+var _caModal = null;
+var _caChatLog = [];
+var _caSelectedBuff = null;
 
 // ---- Check mailbox for adventure invitation mails (type 23) ----
 var _caLastMailRefresh = 0;
@@ -590,6 +496,57 @@ function _caAcceptAdventure(adv) {
         return !!result;
     } catch (e) { _caLog('ERR accept: ' + e); }
     return false;
+}
+
+// ---- Get list of zone buff names ----
+function _caGetZoneBuffs() {
+    var result = [];
+    try {
+        var zbm = game.gi.mZoneBuffManager;
+        var buffs = zbm.getAvailableBuffs_vector ? zbm.getAvailableBuffs_vector() : zbm.mAvailableBuffs_vector;
+        if (buffs) {
+            for (var i = 0; i < buffs.length; i++) {
+                var b = buffs[i];
+                if (b && b.buffName) result.push(b.buffName);
+            }
+        }
+    } catch (e) { _caLog('ERR _caGetZoneBuffs: ' + e); }
+    return result;
+}
+
+// ---- Get list of usable items from star menu ----
+function _caGetStarMenuItems() {
+    var result = [];
+    try {
+        var zoneBuffs = _caGetZoneBuffs();
+        game.gi.mCurrentPlayer.mAvailableBuffs_vector.forEach(function(item) {
+            var type = '';
+            try { type = item.GetType(); } catch(e) { return; }
+            if (!type) return;
+            if (type.toLowerCase().indexOf('bomb') === -1) return; // only show bomb/arrow items
+            var amount = 0;
+            try { amount = item.GetAmount(); } catch(e) { amount = 1; }
+            if (amount <= 0) return;
+            var resName = '';
+            try { resName = item.GetResourceName_string(); } catch(e) {}
+            var displayName = '';
+            try { displayName = loca.GetText('RES', type, ['', resName]); } catch(e) {}
+            if (!displayName || displayName === resName) { try { displayName = loca.GetText('RES', resName) || type; } catch(e) {} }
+            if (!displayName) displayName = type;
+            var iconData = null;
+            try { iconData = item.GetBuffIconData(); } catch(e) {}
+            var isZoneBuff = zoneBuffs.indexOf(type) !== -1;
+            result.push({
+                name: type,
+                resName: resName,
+                displayName: displayName,
+                amount: amount,
+                iconData: iconData,
+                type: isZoneBuff ? 'zone buff' : 'buff'
+            });
+        });
+    } catch (e) { _caLog('ERR _caGetStarMenuItems: ' + e); }
+    return result;
 }
 
 // ---- Check if a zone buff is already running ----
@@ -1150,11 +1107,15 @@ function _caStop() {
 
 // ---- Modal ----
 function _caOpenModal() {
+  try {
+    game.chatMessage('CA: _caOpenModal called', 'adventurer');
     $("div[role='dialog']:not(#coopAdvModal):visible").modal('hide');
 
+    game.chatMessage('CA: creating Modal...', 'adventurer');
     _caModal = new Modal('coopAdvModal', '🤝 Co-op Adventure');
     _caModal.size = 'modal-md';
     _caModal.create();
+    game.chatMessage('CA: Modal created', 'adventurer');
 
     // Footer
     if (_caModal.withFooter('#caStartBtn').length === 0) {
@@ -1196,13 +1157,21 @@ function _caOpenModal() {
         $('#caStopBtn').prop('disabled', false).removeClass('disabled');
     }
 
+    game.chatMessage('CA: calling _caRenderBody...', 'adventurer');
     _caRenderBody();
+    game.chatMessage('CA: calling show...', 'adventurer');
     _caModal.show();
+    game.chatMessage('CA: modal shown OK', 'adventurer');
+  } catch(e) {
+    game.chatMessage('CA OPEN ERROR: ' + e, 'adventurer');
+  }
 }
 
 function _caRenderBody() {
+  try {
     var $body = _caModal.Body();
     $body.html('');
+    game.chatMessage('CA: renderBody start', 'adventurer');
 
     // ---- Status row ----
     var $statusRow = $('<div>').css({ 'padding': '8px 12px', 'background': '#1a1a1a', 'border-radius': '4px', 'margin-bottom': '10px' });
@@ -1249,7 +1218,17 @@ function _caRenderBody() {
                 $row.append(
                     $('<input>').attr({ 'type': 'radio', 'name': 'caBuffSelect', 'value': item.name })
                         .prop('checked', isSelected)
-                        .css('margin-right', '8px'),
+                        .css('margin-right', '8px')
+                );
+                // Icon
+                if (item.iconData) {
+                    try {
+                        var $icon = $(getImageByModule(item.iconData[0], item.iconData[1], 24, 24));
+                        $icon.css({ 'margin-right': '6px', 'vertical-align': 'middle', 'flex-shrink': '0' });
+                        $row.append($icon);
+                    } catch(e) {}
+                }
+                $row.append(
                     $('<span>').css({ 'flex': '1', 'color': '#ddd' }).text(item.displayName),
                     $('<span>').css({ 'color': '#888', 'font-size': '11px', 'margin-left': '8px' }).text('x' + item.amount)
                 );
@@ -1326,4 +1305,8 @@ function _caRenderBody() {
         });
     }
     $body.append($logSection);
+    game.chatMessage('CA: renderBody done', 'adventurer');
+  } catch(e) {
+    game.chatMessage('CA RENDER ERROR: ' + e, 'adventurer');
+  }
 }
