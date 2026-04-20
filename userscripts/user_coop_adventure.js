@@ -78,6 +78,30 @@ var _caState = null;
 var _caModal = null;
 var _caChatLog = [];
 var _caSelectedBuff = null;
+var _caPollTimer = null;
+var _caPollCount = 0;
+var _caLastKnownAdventures = [];
+var _caHandledZones = {};
+
+// ---- Logging ----
+function _caLog(msg) {
+    var line = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+    _caChatLog.push(line);
+    if (_caChatLog.length > 100) _caChatLog.shift();
+    try { game.chatMessage('CA: ' + msg, 'adventurer'); } catch(e) {}
+    // Also update the log panel in the modal if open
+    try {
+        var $log = $('#coopAdvModal .modal-body [id$="logSection"], #coopAdvModal .modal-body div:last-child');
+        if (_caModal) {
+            var $body = _caModal.Body();
+            var $lastDiv = $body.find('div').last();
+            if ($lastDiv.length) {
+                $lastDiv.append($('<div>').css({ 'font-size': '11px', 'color': '#aaa' }).text(line));
+                $lastDiv.scrollTop($lastDiv[0].scrollHeight);
+            }
+        }
+    } catch(e) {}
+}
 
 // ---- Check mailbox for adventure invitation mails (type 23) ----
 var _caLastMailRefresh = 0;
@@ -194,9 +218,12 @@ function _caClickAcceptButton() {
         var mw = globalFlash.gui.mMailWindow;
         var panel = mw.getMPanel();
 
-        // CRITICAL: hide the Co-op modal before clicking — if it's open and sitting
-        // over the mail window it intercepts stage-level events.
-        try { $('#coopAdvModal').hide(); $('.modal-backdrop').hide(); } catch(e) {}
+        // Temporarily make Co-op modal invisible (opacity) so it can't interfere,
+        // WITHOUT calling jQuery .hide() which corrupts Bootstrap's isShown state.
+        var $modal = $('#coopAdvModal');
+        var $backdrop = $('.modal-backdrop');
+        var modalWasVisible = $modal.is(':visible');
+        if (modalWasVisible) { $modal.css({'opacity': '0', 'pointer-events': 'none'}); $backdrop.hide(); }
 
         // Re-select the mail in case view drifted
         if (_caState && _caState.mailVO) {
@@ -251,8 +278,15 @@ function _caClickAcceptButton() {
         btn.dispatchEvent(new ME('mouseUp', true, false, cx, cy));
         btn.dispatchEvent(new ME('click', true, false, cx, cy));
         _caLog('Dispatched direct click on button (local coords ' + cx + ',' + cy + ')');
+
+        // Restore modal visibility
+        if (modalWasVisible) { $modal.css({'opacity': '', 'pointer-events': ''}); $backdrop.show(); }
         return true;
-    } catch (e) { _caLog('ERR clickAccept: ' + e); }
+    } catch (e) {
+        // Always restore modal even on error
+        try { $('#coopAdvModal').css({'opacity': '', 'pointer-events': ''}); $('.modal-backdrop').show(); } catch(e2) {}
+        _caLog('ERR clickAccept: ' + e);
+    }
     return false;
 }
 
@@ -660,9 +694,54 @@ function _caApplyItem(itemName) {
 }
 
 // ---- Phase machine ----
-// Phases: idle → detected → traveling → applying → returning → idle
+// Phases: idle → detected → traveling → applying → wait_buff → waiting_in_zone → idle
 function _caPoll() {
     if (!_caRunning) return;
+
+    // --- Check for Flash error dialogs (e.g. "adventure already finished", "zone expired") ---
+    try {
+        var stage = swmmo.application.stage;
+        function _caScanForDialog(obj, depth) {
+            if (!obj || depth > 8) return null;
+            var txt = '';
+            try { txt = obj.text || ''; } catch(e) {}
+            if (/already finished|not available|expired|could not load|no longer|adventure.*end/i.test(txt)) {
+                return obj;
+            }
+            try {
+                var n = obj.numChildren;
+                for (var ci = 0; ci < n; ci++) {
+                    var found = _caScanForDialog(obj.getChildAt(ci), depth + 1);
+                    if (found) return found;
+                }
+            } catch(e) {}
+            return null;
+        }
+        var dialogText = _caScanForDialog(stage, 0);
+        if (dialogText) {
+            _caLog('Error dialog detected: "' + dialogText.text + '" — dismissing and resetting');
+            // Try clicking an OK/Close button near the dialog
+            try {
+                var parent = dialogText.parent;
+                for (var bi = 0; bi < parent.numChildren; bi++) {
+                    var child = parent.getChildAt(bi);
+                    var ME = window.runtime.flash.events.MouseEvent;
+                    try {
+                        child.dispatchEvent(new ME('click', true, false, child.width/2, child.height/2));
+                    } catch(e) {}
+                }
+            } catch(e) {}
+            // Send Escape as fallback
+            try {
+                var KE = window.runtime.flash.events.KeyboardEvent;
+                stage.dispatchEvent(new KE('keyDown', true, false, 0, 27));
+                stage.dispatchEvent(new KE('keyUp', true, false, 0, 27));
+            } catch(e) {}
+            _caState = null;
+            _caPollCount = 0;
+            return;
+        }
+    } catch(e) {}
 
     if (!_caState) {
         _caPollCount++;
@@ -973,20 +1052,35 @@ function _caPoll() {
             break;
 
         case 'wait_buff':
-            // Brief wait then go home (arrows apply instantly, zone buffs we check)
+            // Brief wait to confirm item applied, then stay in zone
             var isZB2 = _caGetZoneBuffs().indexOf(_caState.buffName) !== -1;
             if (!isZB2 || _caIsBuffRunning(_caState.buffName) || _caState.retries > 5) {
-                _caLog('Done. Returning home...');
-                game.gi.visitZone(game.gi.mCurrentPlayer.GetHomeZoneId());
-                _caState.phase = 'returning';
+                _caLog('Item applied. Staying in zone until adventure finishes...');
+                _caState.phase = 'waiting_in_zone';
                 _caState.retries = 0;
             } else {
                 _caState.retries++;
             }
             break;
 
+        case 'waiting_in_zone':
+            // Stay in the adventure zone until it disappears (adventure ended)
+            var zoneStillExists = _caGetAllAdventures().some(function(a) { return a.zoneID === _caState.advVO.zoneID; });
+            if (!zoneStillExists) {
+                _caLog('Adventure finished! Cycle complete for ' + _caState.advName);
+                _caHandledZones[_caState.advVO.zoneID] = true;
+                _caState = null;
+            } else {
+                // Still running — log occasionally
+                if (_caState.retries % 10 === 0) {
+                    _caLog('Waiting for adventure to finish (' + _caState.retries * 3 + 's elapsed)...');
+                }
+                _caState.retries++;
+            }
+            break;
+
         case 'returning':
-            // Wait until we're home
+            // Wait until we're home (kept for any legacy path that may set this)
             if (game.gi.isOnHomzone()) {
                 _caLog('Back home! Co-op cycle complete for ' + _caState.advName);
                 _caHandledZones[_caState.advVO.zoneID] = true;
@@ -1157,11 +1251,16 @@ function _caOpenModal() {
         $('#caStopBtn').prop('disabled', false).removeClass('disabled');
     }
 
+    game.chatMessage('CA: calling show...', 'adventurer');
+    // Reset any stale Bootstrap modal state, then force-show
+    $('#coopAdvModal').data('bs.modal', null).modal({ backdrop: false });
+    // Ensure modal and backdrop are fully visible (opacity trick in _caClickAcceptButton may have left remnants)
+    $('#coopAdvModal').css({ 'opacity': '', 'pointer-events': '' });
+    $('.modal-backdrop').show();
+    game.chatMessage('CA: modal shown OK', 'adventurer');
+    // Render body AFTER modal is shown so the DOM is fully live
     game.chatMessage('CA: calling _caRenderBody...', 'adventurer');
     _caRenderBody();
-    game.chatMessage('CA: calling show...', 'adventurer');
-    _caModal.show();
-    game.chatMessage('CA: modal shown OK', 'adventurer');
   } catch(e) {
     game.chatMessage('CA OPEN ERROR: ' + e, 'adventurer');
   }
@@ -1170,8 +1269,14 @@ function _caOpenModal() {
 function _caRenderBody() {
   try {
     var $body = _caModal.Body();
+    game.chatMessage('CA: renderBody start, body.length=' + $body.length + ', modal in DOM=' + $('#coopAdvModal').length, 'adventurer');
+    if ($body.length === 0) {
+        game.chatMessage('CA: modal-body not found! HTML=' + $('#coopAdvModal').html().substring(0,200), 'adventurer');
+        return;
+    }
+    game.chatMessage('CA: body display=' + $body.css('display') + ' visibility=' + $body.css('visibility'), 'adventurer');
+    $body.show(); // ensure body is visible (minimize button may have hidden it)
     $body.html('');
-    game.chatMessage('CA: renderBody start', 'adventurer');
 
     // ---- Status row ----
     var $statusRow = $('<div>').css({ 'padding': '8px 12px', 'background': '#1a1a1a', 'border-radius': '4px', 'margin-bottom': '10px' });
