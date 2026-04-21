@@ -105,6 +105,9 @@ function _bsMenuHandler() {
                 $('<button>').attr({ id: 'bsAutoBtn', 'class': 'btn btn-warning' })
                              .text('Auto Update: ON').prop('outerHTML') +
                 '&nbsp;&nbsp;<span id="bsTotalSpan" style="font-weight:bold;"></span>' +
+                '&nbsp;&nbsp;<input id="bsSearch" type="text" placeholder="&#128269; Search buildings..."' +
+                ' style="width:180px;padding:2px 6px;border-radius:3px;border:1px solid #888;' +
+                'background:#2a1a0e;color:#ffcc88;vertical-align:middle;" />' +
                 createTableRow([
                     [2, 'Building'], [1, 'Produces'], [1, 'Deposit'],
                     [2, 'Status'], [1, 'Action'], [2, 'Time Left'], [2, 'Storage'], [1, 'Buffed']
@@ -548,6 +551,12 @@ function _bsRenderData(groups) {
         _bsToggleProduction(grid, isActive);
     });
 
+    // Apply current search term after each render
+    _bsApplySearch();
+
+    // Re-wire search input (in case modal was re-initialized)
+    $('#bsSearch').off('input').on('input', _bsApplySearch);
+
     // Toggle section collapse on header click
     $('#bsModalData .bs-section').off('click').on('click', function () {
         var secId      = $(this).data('sec');
@@ -556,6 +565,38 @@ function _bsRenderData(groups) {
         _bsCollapsed[secId] = nowHidden;
         content.toggle(!nowHidden);
         $(this).toggleClass('collapsed', nowHidden);
+    });
+}
+
+// ---- Filter visible building rows by search term ----
+function _bsApplySearch() {
+    var term = ($('#bsSearch').val() || '').toUpperCase().trim();
+    $('#bsModalData .bs-section').each(function () {
+        var secId  = $(this).data('sec');
+        var secDiv = $('#' + secId);
+        var rows   = secDiv.find('.row');
+        var visCount = 0;
+        rows.each(function () {
+            if (!term || $(this).text().toUpperCase().indexOf(term) !== -1) {
+                $(this).show();
+                visCount++;
+            } else {
+                $(this).hide();
+            }
+        });
+        if (term) {
+            if (visCount > 0) {
+                $(this).show();
+                secDiv.show();
+            } else {
+                $(this).hide();
+                secDiv.hide();
+            }
+        } else {
+            var isCollapsed = $(this).hasClass('collapsed');
+            $(this).show();
+            secDiv.toggle(!isCollapsed);
+        }
     });
 }
 
