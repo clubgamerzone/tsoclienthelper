@@ -1179,6 +1179,8 @@ function _caStart() {
     _caUpdateStatus();
     $('#caStartBtn').prop('disabled', true).addClass('disabled');
     $('#caStopBtn').prop('disabled', false).removeClass('disabled');
+    // Close the modal so it doesn't block Flash events (script keeps running in background)
+    try { $('#coopAdvModal').modal('hide'); } catch(e) {}
 }
 
 function _caStop() {
