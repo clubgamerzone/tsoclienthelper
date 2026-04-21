@@ -11,16 +11,16 @@ try { addToolsMenuItem('CA Test Click', _caTestClick); } catch (e) {}
 // ---- Test click dispatcher (without needing window) ----
 function _caTestClick() {
     try {
-        // Dump star menu item types to find arrow internal names
-        var types = [];
-        game.gi.mCurrentPlayer.mAvailableBuffs_vector.forEach(function(item) {
-            var type = '', res = '', amt = 0;
-            try { type = item.GetType(); } catch(e) { return; }
-            try { res  = item.GetResourceName_string(); } catch(e) {}
-            try { amt  = item.GetAmount(); } catch(e) {}
-            types.push(type + (res ? '|' + res : '') + ' x' + amt);
-        });
-        game.chatMessage('CA types (' + types.length + '): ' + types.join(' / '), 'adventurer');
+        var panel = globalFlash.gui.mMailWindow.getMPanel();
+        var btn = panel.btnAdventureInviteAccept;
+        if (!btn) { game.chatMessage('CA TEST: btnAdventureInviteAccept not found', 'adventurer'); return; }
+        game.chatMessage('CA TEST: btn visible=' + btn.visible + ' enabled=' + btn.enabled, 'adventurer');
+        var ME = window.runtime.flash.events.MouseEvent;
+        var cx = btn.width / 2, cy = btn.height / 2;
+        btn.dispatchEvent(new ME('mouseDown', true, false, cx, cy, null, false, false, false, true));
+        btn.dispatchEvent(new ME('mouseUp', true, false, cx, cy));
+        btn.dispatchEvent(new ME('click', true, false, cx, cy));
+        game.chatMessage('CA TEST: click dispatched at (' + cx + ',' + cy + ')', 'adventurer');
     } catch(e) {
         game.chatMessage('CA TEST ERR: ' + e, 'adventurer');
     }
@@ -198,6 +198,7 @@ function _caSelectMailInvitation(mailVO) {
         var vs = panel.mailContent;
         var invitePanel = panel.contentAdventureInvite;
         if (vs && invitePanel) {
+            chatMessage('Forcing ViewStack to show adventure invite panel...', 'adventurer');
             try {
                 vs.selectedChild = invitePanel;
                 _caLog('Set mailContent.selectedChild = contentAdventureInvite');
@@ -217,13 +218,6 @@ function _caClickAcceptButton() {
     try {
         var mw = globalFlash.gui.mMailWindow;
         var panel = mw.getMPanel();
-
-        // Temporarily make Co-op modal invisible (opacity) so it can't interfere,
-        // WITHOUT calling jQuery .hide() which corrupts Bootstrap's isShown state.
-        var $modal = $('#coopAdvModal');
-        var $backdrop = $('.modal-backdrop');
-        var modalWasVisible = $modal.is(':visible');
-        if (modalWasVisible) { $modal.css({'opacity': '0', 'pointer-events': 'none'}); $backdrop.hide(); }
 
         // Re-select the mail in case view drifted
         if (_caState && _caState.mailVO) {
@@ -274,17 +268,12 @@ function _caClickAcceptButton() {
         // Stage-level dispatch was intercepted by the Co-op modal overlay.
         var ME = window.runtime.flash.events.MouseEvent;
         var cx = btn.width / 2, cy = btn.height / 2;
-        btn.dispatchEvent(new ME('mouseDown', true, false, cx, cy, null, false, false, false, true));
-        btn.dispatchEvent(new ME('mouseUp', true, false, cx, cy));
+       // btn.dispatchEvent(new ME('mouseDown', true, false, cx, cy, null, false, false, false, true));
+      //  btn.dispatchEvent(new ME('mouseUp', true, false, cx, cy));
         btn.dispatchEvent(new ME('click', true, false, cx, cy));
         _caLog('Dispatched direct click on button (local coords ' + cx + ',' + cy + ')');
-
-        // Restore modal visibility
-        if (modalWasVisible) { $modal.css({'opacity': '', 'pointer-events': ''}); $backdrop.show(); }
         return true;
     } catch (e) {
-        // Always restore modal even on error
-        try { $('#coopAdvModal').css({'opacity': '', 'pointer-events': ''}); $('.modal-backdrop').show(); } catch(e2) {}
         _caLog('ERR clickAccept: ' + e);
     }
     return false;
@@ -292,6 +281,9 @@ function _caClickAcceptButton() {
 
 // ---- Scan quest pool for adventure-related quests ----
 function _caScanQuestPool(zoneID) {
+
+    return null;
+    _caLog("removed scan quest pool code to avoid Flash errors — will re-implement later if needed");
     var results = [];
     try {
         var pool = game.quests.GetQuestPool();
@@ -341,6 +333,8 @@ function _caScanQuestPool(zoneID) {
 
 // ---- Accept adventure via Quest Book UI (like quest runner does) ----
 function _caAcceptViaQuestBook(mailVO, callback) {
+      return null;
+    _caLog("removed scan quest pool code to avoid Flash errors — will re-implement later if needed");
     var zoneID = mailVO ? mailVO.subject : '';
     _caLog('Trying Quest Book approach for zone ' + zoneID + '...');
 
@@ -705,7 +699,9 @@ function _caPoll() {
             if (!obj || depth > 8) return null;
             var txt = '';
             try { txt = obj.text || ''; } catch(e) {}
-            if (/already finished|not available|expired|could not load|no longer|adventure.*end/i.test(txt)) {
+            // Only match multi-word error sentences (length > 10) to avoid matching
+            // standalone UI labels like "Not available!" on disabled buttons/items.
+            if (txt.length > 10 && /already finished|adventure.*not available|zone.*expired|could not load|adventure.*no longer|adventure.*end/i.test(txt)) {
                 return obj;
             }
             try {
