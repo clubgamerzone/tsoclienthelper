@@ -1063,9 +1063,11 @@ function _caPoll() {
             // Stay in the adventure zone until it disappears (adventure ended)
             var zoneStillExists = _caGetAllAdventures().some(function(a) { return a.zoneID === _caState.advVO.zoneID; });
             if (!zoneStillExists) {
-                _caLog('Adventure finished! Cycle complete for ' + _caState.advName);
+                _caLog('Adventure finished! Heading home...');
                 _caHandledZones[_caState.advVO.zoneID] = true;
-                _caState = null;
+                game.gi.visitZone(game.gi.mCurrentPlayer.GetHomeZoneId());
+                _caState.phase = 'returning';
+                _caState.retries = 0;
             } else {
                 // Still running — log occasionally
                 if (_caState.retries % 10 === 0) {
