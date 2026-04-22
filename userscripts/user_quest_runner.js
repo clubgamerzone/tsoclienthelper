@@ -2014,6 +2014,9 @@ function _qrMakeStepRow(step, idx) {
 // ---- Read UI back into the loaded profile ----
 function _qrSaveCurrentFromUI() {
     if (!_qrProfile) { return; }
+    // Never overwrite the in-memory profile while a run is active —
+    // the DOM may be stale or the modal closed, which would wipe steps/army/etc.
+    if (_qrRunning) { return; }
     var profile = _qrProfile;
     profile.name = $('#qrName').val() || _qrT('unnamed');
 
@@ -2295,8 +2298,6 @@ function _qrSendCoopInvites(profile, zoneId, callback) {
 // ---- Run profile ----
 function _qrRun() {
     if (_qrRunning) { return; }
-    _qrSaveCurrentFromUI();
-    _qrSave();
 
     if (!_qrProfile) { return; }
     var profile = _qrProfile;
@@ -4708,6 +4709,9 @@ function _qrRunBattleScript(startIdx) {
                     }
 
                     function caqCollectAll(done) {
+                        // Guard: ensure done() is called exactly once even if the queue stalls
+                        var caqDoneCalled = false;
+                        function caqDoneSafe() { if (!caqDoneCalled) { caqDoneCalled = true; done(); } }
                         try {
                             var cMgr = swmmo.getDefinitionByName('Collections::CollectionsManager').getInstance();
                             var cq = new TimedQueue(1000);
@@ -4728,13 +4732,20 @@ function _qrRunBattleScript(startIdx) {
                                     (qtMap[b.GetBuildingName_string()] && b.mIsSelectable &&
                                      goc.mIsAttackable && !goc.mIsLeaderCamp && goc.ui !== 'enemy' &&
                                      (b.GetArmy() == null || !b.GetArmy().HasUnits()))
-                                ) { cq.add(function () { game.gi.SelectBuilding(b); }); }
+                                ) {
+                                    // Capture b in a closure so the correct reference is used per item
+                                    (function (bld) {
+                                        cq.add(function () { try { game.gi.SelectBuilding(bld); } catch (e) {} });
+                                    })(b);
+                                }
                             });
-                            if (cq.len() === 0) { done(); return; }
+                            if (cq.len() === 0) { caqDoneSafe(); return; }
                             game.chatMessage('COLLECT_ALL: collecting ' + cq.len() + ' collectible(s)\u2026', 'adventurer');
-                            cq.add(function () { done(); });
+                            cq.add(function () { caqDoneSafe(); });
                             cq.run();
-                        } catch (e) { done(); }
+                            // Safety timeout: if queue takes more than 60s, unblock the chain
+                            setTimeout(function () { caqDoneSafe(); }, cq.len() * 1200 + 10000);
+                        } catch (e) { caqDoneSafe(); }
                     }
 
                     function caqCountFinished() {

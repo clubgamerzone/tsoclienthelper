@@ -5,8 +5,6 @@
 addToolsMenuItem('Building Status', _bsMenuHandler);
 
 var _bsModalInitialized = false;
-var _bsRefreshInterval  = null;
-var _bsAutoUpdate       = true;
 
 // ---- Section category definitions ----
 var _bsSectionDefs = [
@@ -101,9 +99,6 @@ function _bsMenuHandler() {
                 '<div class="container-fluid">' +
                 $('<button>').attr({ id: 'bsRefreshBtn', 'class': 'btn btn-success' })
                              .text('Refresh').prop('outerHTML') +
-                '&nbsp;&nbsp;' +
-                $('<button>').attr({ id: 'bsAutoBtn', 'class': 'btn btn-warning' })
-                             .text('Auto Update: ON').prop('outerHTML') +
                 '&nbsp;&nbsp;<span id="bsTotalSpan" style="font-weight:bold;"></span>' +
                 '&nbsp;&nbsp;<input id="bsSearch" type="text" placeholder="&#128269; Search buildings..."' +
                 ' style="width:180px;padding:2px 6px;border-radius:3px;border:1px solid #888;' +
@@ -117,33 +112,9 @@ function _bsMenuHandler() {
 
             $('#bsRefreshBtn').click(function () { _bsRefresh(); });
 
-
-
-            $('#bsAutoBtn').click(function () {
-                _bsAutoUpdate = !_bsAutoUpdate;
-                $(this).text('Auto Update: ' + (_bsAutoUpdate ? 'ON' : 'OFF'))
-                       .toggleClass('btn-warning', _bsAutoUpdate)
-                       .toggleClass('btn-default', !_bsAutoUpdate);
-                if (_bsAutoUpdate) {
-                    _bsRefresh();
-                } else {
-                    if (_bsRefreshInterval) {
-                        clearInterval(_bsRefreshInterval);
-                        _bsRefreshInterval = null;
-                    }
-                }
-            });
-
             $('#bsModal').on('shown.bs.modal', function () {
                 $('#bsModal .modal-dialog').draggable({ handle: '#bsModal .modal-header', containment: 'window' });
             });
-            $('#bsModal').on('hidden.bs.modal', function () {
-                if (_bsRefreshInterval) {
-                    clearInterval(_bsRefreshInterval);
-                    _bsRefreshInterval = null;
-                }
-            });
-
             _bsModalInitialized = true;
         }
 
@@ -154,27 +125,12 @@ function _bsMenuHandler() {
     $('#bsModal:not(:visible)').modal({ backdrop: false });
 }
 
-// ---- Refresh: collect data + render + schedule next auto-refresh ----
+// ---- Refresh: collect data + render ----
 function _bsRefresh() {
     try {
         var groups = _bsGetData();
         _bsRenderData(groups);
     } catch (e) {}
-
-    if (_bsRefreshInterval) clearInterval(_bsRefreshInterval);
-    if (_bsAutoUpdate) {
-        _bsRefreshInterval = setInterval(function () {
-            if ($('#bsModal:visible').length > 0 && _bsAutoUpdate) {
-                try {
-                    var groups = _bsGetData();
-                    _bsRenderData(groups);
-                } catch (e) {}
-            } else {
-                clearInterval(_bsRefreshInterval);
-                _bsRefreshInterval = null;
-            }
-        }, 30000);
-    }
 }
 
 // ---- Collect data from Flash game object, grouped by category ----
@@ -215,10 +171,11 @@ function _bsGetData() {
             var locName = loca.GetText("BUI", nameKey);
             if (!locName || locName.indexOf("undefined") > -1) return;
 
-            // Always skip farmfields and garrisons regardless of deposit presence
+            // Always skip farmfields, garrisons, and enemy camp buildings
             var nUp = nameKey.toUpperCase();
             if (nUp.indexOf('FARMFIELD') !== -1) return;
             try { if (bld.isGarrison()) return; } catch (e) {}
+            try { if (bld.IsReadyToIntercept && bld.IsReadyToIntercept()) return; } catch (e) {}
 
             // A building is a "mine" if a deposit exists at its grid position.
             // Quarries reference the deposit via GetDepositBuildingGridPos() rather than
@@ -268,10 +225,15 @@ function _bsGetData() {
                 }
             } catch (e) {}
 
-            // GetUIUpgradeLevel() triggers a Flash assert on buildings without upgrade bonuses.
-            // GetUpgradeLevel() returns a 0-based index, so add 1 for the user-visible level.
+            // GetUIUpgradeLevel() and GetUpgradeLevel() both trigger a Flash assert on buildings
+            // without upgrade bonuses (e.g. adventure enemy camps). Guard with GetGOContainer() check.
             var bldLevel = 0;
-            try { bldLevel = bld.GetUpgradeLevel(); } catch (e) {}
+            try {
+                var goContainer = bld.GetGOContainer ? bld.GetGOContainer() : null;
+                if (goContainer && goContainer.buildingUpgradeBonuses_vector != null) {
+                    bldLevel = bld.GetUpgradeLevel();
+                }
+            } catch (e) {}
 
             var entry = {
                 NameKey:          nameKey,

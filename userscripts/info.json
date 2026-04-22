@@ -1,4 +1,10 @@
 {
+   "user_move_grid_tester.js":{
+      "name":"Move Grid Tester",
+      "shortDesc":"Move a general to a specific grid position",
+      "longDesc":"Standalone tool to move a general to a target grid. Supports x/y coordinate inputs with live grid-number sync, safe-cell scanning (avoids enemy watch areas), map preview, and a Move button that polls until the general departs. Accessible via Tools > Move Grid Tester.",
+      "author":"custom"
+   },
    "user_coop_adventure.js":{
       "name":"Co-op Adventure",
       "shortDesc":"Auto-accept adventure invitations and apply buffs",
