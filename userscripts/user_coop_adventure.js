@@ -14,13 +14,20 @@ function _caTestClick() {
         var panel = globalFlash.gui.mMailWindow.getMPanel();
         var btn = panel.btnAdventureInviteAccept;
         if (!btn) { game.chatMessage('CA TEST: btnAdventureInviteAccept not found', 'adventurer'); return; }
-        game.chatMessage('CA TEST: btn visible=' + btn.visible + ' enabled=' + btn.enabled, 'adventurer');
         var ME = window.runtime.flash.events.MouseEvent;
         var cx = btn.width / 2, cy = btn.height / 2;
+        var stagePos = '';
+        try {
+            var pt = btn.localToGlobal(new window.runtime.flash.geom.Point(cx, cy));
+            stagePos = ' stage=(' + pt.x.toFixed(1) + ',' + pt.y.toFixed(1) + ')';
+        } catch(pe) { stagePos = ' (stage pos err)'; }
+        game.chatMessage('CA TEST: btn visible=' + btn.visible + ' enabled=' + btn.enabled +
+            ' w=' + btn.width + ' h=' + btn.height +
+            ' clickAt local=(' + cx.toFixed(1) + ',' + cy.toFixed(1) + ')' + stagePos, 'adventurer');
         btn.dispatchEvent(new ME('mouseDown', true, false, cx, cy, null, false, false, false, true));
         btn.dispatchEvent(new ME('mouseUp', true, false, cx, cy));
         btn.dispatchEvent(new ME('click', true, false, cx, cy));
-        game.chatMessage('CA TEST: click dispatched at (' + cx + ',' + cy + ')', 'adventurer');
+        game.chatMessage('CA TEST: click dispatched', 'adventurer');
     } catch(e) {
         game.chatMessage('CA TEST ERR: ' + e, 'adventurer');
     }
@@ -160,54 +167,67 @@ function _caSelectMailInvitation(mailVO) {
     try {
         var mw = globalFlash.gui.mMailWindow;
         var panel = mw.getMPanel();
-        // Show the mail window so the view is active
         mw.Show();
-        // Select the mail via the controller
-        mw.setMail(mailVO);
 
-        // Also select in the list to trigger view switch
         var list = panel.mailsList;
-        if (list) {
-            // Try setting selectedItem directly
-            list.selectedItem = mailVO;
-            _caLog('Set mailsList.selectedItem');
+        if (!list) { _caLog('mailsList not found'); return false; }
 
-            // Also try finding by index in dataProvider
-            var dp = list.dataProvider;
-            if (dp) {
-                for (var i = 0; i < dp.length; i++) {
-                    var item = dp.getItemAt(i);
-                    if (item && item.id === mailVO.id) {
-                        list.selectedIndex = i;
-                        _caLog('Set mailsList.selectedIndex=' + i);
-                        // Dispatch a ListEvent.CHANGE to trigger the handler
-                        try {
-                            var ListEvent = swmmo.getDefinitionByName("mx.events::ListEvent");
-                            list.dispatchEvent(new ListEvent(ListEvent.CHANGE));
-                            _caLog('Dispatched ListEvent.CHANGE');
-                        } catch (le) {
-                            _caLog('ListEvent dispatch err: ' + le);
-                        }
-                        break;
-                    }
-                }
-            }
+        // Find the index of the target mail
+        var dp = list.dataProvider;
+        if (!dp) { _caLog('mailsList has no dataProvider'); return false; }
+        var idx = -1;
+        for (var i = 0; i < dp.length; i++) {
+            var item = dp.getItemAt ? dp.getItemAt(i) : dp[i];
+            if (item && item.id === mailVO.id) { idx = i; break; }
         }
+        if (idx < 0) { _caLog('Target mail id=' + mailVO.id + ' not found in dataProvider'); return false; }
+        _caLog('Target mail at index ' + idx);
 
-        // Force the ViewStack to show the adventure invite content
-        var vs = panel.mailContent;
-        var invitePanel = panel.contentAdventureInvite;
-        if (vs && invitePanel) {
-            chatMessage('Forcing ViewStack to show adventure invite panel...', 'adventurer');
+        // Make sure the row is in view so the renderer is realised
+        try { list.scrollToIndex(idx); } catch(e) {}
+        try { list.ensureIndexIsVisible(idx); } catch(e) {}
+
+        // Resolve the row renderer (mx.controls.List vs spark.components.List)
+        var renderer = null;
+        try { renderer = list.indexToItemRenderer(idx); } catch(e) {}
+        if (!renderer) {
             try {
-                vs.selectedChild = invitePanel;
-                _caLog('Set mailContent.selectedChild = contentAdventureInvite');
-            } catch (ve) {
-                _caLog('ViewStack switch err: ' + ve);
-            }
+                if (list.dataGroup && list.dataGroup.getElementAt) {
+                    renderer = list.dataGroup.getElementAt(idx);
+                }
+            } catch(e) {}
         }
+        if (!renderer) {
+            _caLog('Renderer not realised yet — falling back to selectedIndex');
+            list.selectedIndex = idx;
+            return true;
+        }
+        _caLog('Renderer found: ' + renderer);
 
-        _caLog('Opened mail window, selected invitation from ' + mailVO.senderName);
+        // Dispatch a real mouse sequence on the renderer.
+        // Flex's internal selection pipeline listens to mouseDown on item renderers
+        // and stores the selected item into the private current-mail field.
+        var ME = window.runtime.flash.events.MouseEvent;
+        var rw = 0, rh = 0;
+        try { rw = renderer.width || 0; rh = renderer.height || 0; } catch(e) {}
+        var cx = rw / 2, cy = rh / 2;
+        var stagePos = '';
+        try {
+            var pt = renderer.localToGlobal(new window.runtime.flash.geom.Point(cx, cy));
+            stagePos = ' stage=(' + pt.x.toFixed(1) + ',' + pt.y.toFixed(1) + ')';
+        } catch(pe) {}
+        _caLog('Renderer w=' + rw + ' h=' + rh + ' clickAt local=(' + cx + ',' + cy + ')' + stagePos);
+
+        try {
+            renderer.dispatchEvent(new ME('rollOver', true, false, cx, cy, null, false, false, false, false));
+            renderer.dispatchEvent(new ME('mouseOver', true, false, cx, cy, null, false, false, false, false));
+            renderer.dispatchEvent(new ME('mouseDown', true, false, cx, cy, null, false, false, false, true));
+            renderer.dispatchEvent(new ME('mouseUp',   true, false, cx, cy, null, false, false, false, false));
+            renderer.dispatchEvent(new ME('click',     true, false, cx, cy, null, false, false, false, false));
+            _caLog('Dispatched rollOver/mouseDown/mouseUp/click on renderer');
+        } catch(de) { _caLog('Renderer dispatch err: ' + de); }
+
+        _caLog('Selected mail from ' + mailVO.senderName + ' via renderer click');
         return true;
     } catch (e) { _caLog('ERR selectMail: ' + e); }
     return false;
@@ -220,28 +240,28 @@ function _caClickAcceptButton() {
         var panel = mw.getMPanel();
 
         // Re-select the mail in case view drifted
-        if (_caState && _caState.mailVO) {
-            try {
-                mw.Show();
-                mw.setMail(_caState.mailVO);
-                var list = panel.mailsList;
-                var dp = list.dataProvider;
-                if (dp) {
-                    for (var i = 0; i < dp.length; i++) {
-                        var item = dp.getItemAt ? dp.getItemAt(i) : dp[i];
-                        if (item && item.id === _caState.mailVO.id) {
-                            list.selectedIndex = i;
-                            list.selectedItem = item;
-                            try {
-                                var ListEvent = swmmo.getDefinitionByName("mx.events::ListEvent");
-                                list.dispatchEvent(new ListEvent(ListEvent.CHANGE));
-                            } catch(le) {}
-                            break;
-                        }
-                    }
-                }
-            } catch(e) { _caLog('Re-select err: ' + e); }
-        }
+        // if (_caState && _caState.mailVO) {
+        //     try {
+        //         mw.Show();
+        //         mw.setMail(_caState.mailVO);
+        //         var list = panel.mailsList;
+        //         var dp = list.dataProvider;
+        //         if (dp) {
+        //             for (var i = 0; i < dp.length; i++) {
+        //                 var item = dp.getItemAt ? dp.getItemAt(i) : dp[i];
+        //                 if (item && item.id === _caState.mailVO.id) {
+        //                     list.selectedIndex = i;
+        //                     list.selectedItem = item;
+        //                     try {
+        //                         var ListEvent = swmmo.getDefinitionByName("mx.events::ListEvent");
+        //                         list.dispatchEvent(new ListEvent(ListEvent.CHANGE));
+        //                     } catch(le) {}
+        //                     break;
+        //                 }
+        //             }
+        //         }
+        //     } catch(e) { _caLog('Re-select err: ' + e); }
+        // }
 
         // Force ViewStack to adventure invite panel
         var vs = panel.mailContent;
@@ -257,21 +277,25 @@ function _caClickAcceptButton() {
             return false;
         }
 
-        _caLog('Accept btn visible=' + btn.visible + ', enabled=' + btn.enabled);
+        // Log button geometry and stage position
+        var ME = window.runtime.flash.events.MouseEvent;
+        var cx = btn.width / 2, cy = btn.height / 2;
+        var stagePos = '';
+        try {
+            var pt = btn.localToGlobal(new window.runtime.flash.geom.Point(cx, cy));
+            stagePos = ' stage=(' + pt.x.toFixed(1) + ',' + pt.y.toFixed(1) + ')';
+        } catch(pe) { stagePos = ' (stage pos err)'; }
+        _caLog('Accept btn visible=' + btn.visible + ', enabled=' + btn.enabled +
+               ', w=' + btn.width + ', h=' + btn.height +
+               ', clickAt local=(' + cx.toFixed(1) + ',' + cy.toFixed(1) + ')' + stagePos);
 
         if (!btn.enabled) {
             _caLog('Button disabled — wrong mail selected or already accepted');
             return false;
         }
 
-        // Dispatch DIRECTLY on the button with LOCAL coords.
-        // Stage-level dispatch was intercepted by the Co-op modal overlay.
-        var ME = window.runtime.flash.events.MouseEvent;
-        var cx = btn.width / 2, cy = btn.height / 2;
-       // btn.dispatchEvent(new ME('mouseDown', true, false, cx, cy, null, false, false, false, true));
-      //  btn.dispatchEvent(new ME('mouseUp', true, false, cx, cy));
         btn.dispatchEvent(new ME('click', true, false, cx, cy));
-        _caLog('Dispatched direct click on button (local coords ' + cx + ',' + cy + ')');
+        _caLog('Dispatched click at local (' + cx.toFixed(1) + ',' + cy.toFixed(1) + ')' + stagePos);
         return true;
     } catch (e) {
         _caLog('ERR clickAccept: ' + e);
@@ -279,238 +303,6 @@ function _caClickAcceptButton() {
     return false;
 }
 
-// ---- Scan quest pool for adventure-related quests ----
-function _caScanQuestPool(zoneID) {
-
-    return null;
-    _caLog("removed scan quest pool code to avoid Flash errors — will re-implement later if needed");
-    var results = [];
-    try {
-        var pool = game.quests.GetQuestPool();
-        var quests = pool.GetQuest_vector();
-        _caLog('Quest pool has ' + quests.length + ' quests. Scanning for adventure zone ' + zoneID + '...');
-        for (var i = 0; i < quests.length; i++) {
-            var q = quests[i];
-            if (!q) continue;
-            try {
-                var def = q.mQuestDefinition;
-                var triggers = [];
-                var questName = '';
-                if (def && def.questTriggers_vector) {
-                    for (var t = 0; t < def.questTriggers_vector.length; t++) {
-                        var trig = def.questTriggers_vector[t];
-                        if (trig && trig.name_string) triggers.push(trig.name_string);
-                    }
-                }
-                // Try to get the quest name
-                try { questName = triggers.length > 0 ? triggers[0].replace(/_p\d+$/, '') : ''; } catch(e) {}
-                var active = false;
-                try { active = q.IsQuestActive(); } catch(e) {}
-                var finished = false;
-                try { finished = q.isFinished(); } catch(e) {}
-
-                // Log all adventure-related quests (contain 'adv', 'coop', 'invitation')
-                var trigStr = triggers.join(',');
-                var isAdv = /adv|coop|invit/i.test(trigStr + questName);
-                if (isAdv || i < 5) { // log first 5 plus any adventure-related
-                    var locaName = '';
-                    try { locaName = loca.GetText('ADN', questName) || loca.GetText('QUL', questName) || ''; } catch(e) {}
-                    _caLog('  Q[' + i + '] name="' + questName + '" loca="' + locaName + '" active=' + active + ' finished=' + finished + ' triggers=' + trigStr);
-                }
-                results.push({
-                    index: i,
-                    quest: q,
-                    name: questName,
-                    triggers: triggers,
-                    active: active,
-                    finished: finished
-                });
-            } catch(e) {}
-        }
-    } catch(e) { _caLog('ERR scanQuestPool: ' + e); }
-    return results;
-}
-
-// ---- Accept adventure via Quest Book UI (like quest runner does) ----
-function _caAcceptViaQuestBook(mailVO, callback) {
-      return null;
-    _caLog("removed scan quest pool code to avoid Flash errors — will re-implement later if needed");
-    var zoneID = mailVO ? mailVO.subject : '';
-    _caLog('Trying Quest Book approach for zone ' + zoneID + '...');
-
-    // First scan the quest pool for any adventure-related quest
-    var quests = _caScanQuestPool(zoneID);
-
-    // Look for a quest that might be the adventure invitation
-    // Adventure quests often have triggers containing the adventure name
-    var candidateQuest = null;
-    for (var i = 0; i < quests.length; i++) {
-        var q = quests[i];
-        // Check if any trigger matches adventure-related patterns
-        var trigStr = q.triggers.join(',').toLowerCase();
-        if (/adv|coop|invit/i.test(trigStr) && !q.finished) {
-            candidateQuest = q;
-            _caLog('Candidate quest found: Q[' + q.index + '] name="' + q.name + '"');
-            break;
-        }
-    }
-
-    if (!candidateQuest) {
-        _caLog('No adventure quest found in quest pool. Dumping all ' + quests.length + ' quests...');
-        // Dump all quest names for diagnostics
-        for (var j = 0; j < quests.length; j++) {
-            _caLog('  Q[' + quests[j].index + '] "' + quests[j].name + '" active=' + quests[j].active + ' finished=' + quests[j].finished + ' triggers=' + quests[j].triggers.join(','));
-        }
-        if (callback) callback(false);
-        return;
-    }
-
-    // Try to open the Quest Book for this quest (same pattern as questlist.js)
-    try {
-        _caLog('Calling finishQuest to open Quest Book...');
-        game.quests.finishQuest(candidateQuest.quest);
-    } catch(e) {
-        _caLog('finishQuest error: ' + e);
-        if (callback) callback(false);
-        return;
-    }
-
-    // Wait for Quest Book to appear on stage, then look for accept/close buttons
-    setTimeout(function() {
-        try {
-            var stage = swmmo.application.stage;
-            var ME = window.runtime.flash.events.MouseEvent;
-
-            // Find the QuestBook on stage
-            var questBook = null;
-            function findQB(obj, depth) {
-                if (depth > 5 || questBook) return;
-                try {
-                    var nc = obj.numChildren;
-                    for (var i = 0; i < nc; i++) {
-                        var child = obj.getChildAt(i);
-                        var cs = '' + child;
-                        if (cs.indexOf('QuestBook') !== -1 && cs.indexOf('btnQuestBook') === -1) {
-                            questBook = child;
-                            return;
-                        }
-                        findQB(child, depth + 1);
-                    }
-                } catch(e) {}
-            }
-            findQB(stage, 0);
-
-            if (!questBook) {
-                _caLog('QuestBook not found on stage after finishQuest');
-                if (callback) callback(false);
-                return;
-            }
-            _caLog('QuestBook found on stage');
-
-            // Find named children recursively
-            function findChild(obj, name, depth) {
-                if (depth > 12) return null;
-                try {
-                    var nc = obj.numChildren;
-                    for (var i = 0; i < nc; i++) {
-                        var c = obj.getChildAt(i);
-                        if (c.name === name) return c;
-                        var f = findChild(c, name, depth + 1);
-                        if (f) return f;
-                    }
-                } catch(e) {}
-                return null;
-            }
-
-            function clickAS3(obj) {
-                var cx = obj.width / 2, cy = obj.height / 2;
-                obj.dispatchEvent(new ME('mouseDown', true, false, cx, cy));
-                obj.dispatchEvent(new ME('mouseUp', true, false, cx, cy));
-                obj.dispatchEvent(new ME('click', true, false, cx, cy));
-            }
-
-            // Log all buttons we can find
-            var btnNames = ['btnCloseQuest', 'btnPayQuest', 'btnInstantFinish', 'btnCloseBook',
-                            'btnAccept', 'btnAdventureInviteAccept', 'btnJoin', 'btnStart', 'OK', 'btnOk', 'btnYes'];
-            btnNames.forEach(function(n) {
-                var b = findChild(questBook, n, 0);
-                _caLog('  QB btn ' + n + ' = ' + (b ? 'vis=' + b.visible + ' enabled=' + b.enabled : 'NOT FOUND'));
-            });
-
-            // Also dump all named children to find what buttons exist
-            var allChildren = [];
-            function walkChildren(obj, depth) {
-                if (depth > 8) return;
-                try {
-                    var nc = obj.numChildren;
-                    for (var i = 0; i < nc; i++) {
-                        var c = obj.getChildAt(i);
-                        if (c.name && /btn|accept|join|invit|ok|yes|confirm/i.test(c.name)) {
-                            allChildren.push({ name: c.name, vis: c.visible, depth: depth });
-                        }
-                        walkChildren(c, depth + 1);
-                    }
-                } catch(e) {}
-            }
-            walkChildren(questBook, 0);
-            if (allChildren.length > 0) {
-                _caLog('QB button-like children: ' + JSON.stringify(allChildren));
-            }
-
-            // Try clicking accept/join/close buttons
-            var acceptNames = ['btnAccept', 'btnAdventureInviteAccept', 'btnJoin', 'btnStart',
-                               'btnCloseQuest', 'btnPayQuest', 'OK', 'btnOk'];
-            var clicked = false;
-            for (var bi = 0; bi < acceptNames.length; bi++) {
-                var btn = findChild(questBook, acceptNames[bi], 0);
-                if (btn && btn.visible) {
-                    _caLog('Clicking QB button: ' + acceptNames[bi]);
-                    clickAS3(btn);
-                    clicked = true;
-                    break;
-                }
-            }
-
-            if (!clicked) {
-                _caLog('No clickable accept button found in Quest Book');
-                // Close the quest book
-                var closeBtn = findChild(questBook, 'btnCloseBook', 0);
-                if (closeBtn) clickAS3(closeBtn);
-            }
-
-            // Wait and check for confirmation dialogs
-            setTimeout(function() {
-                // Look for confirmation dialog (same as questlist)
-                var found = false;
-                var confirmNames = ['OK', 'btnOk', 'btnYes', 'btnConfirm', 'btnAccept'];
-                function walkConfirm(obj, depth) {
-                    if (depth > 10 || found) return;
-                    try {
-                        var nc = obj.numChildren;
-                        for (var i = 0; i < nc; i++) {
-                            var c = obj.getChildAt(i);
-                            if (!c.visible) continue;
-                            for (var ci = 0; ci < confirmNames.length; ci++) {
-                                if (c.name === confirmNames[ci]) {
-                                    clickAS3(c);
-                                    _caLog('Confirmed dialog: ' + c.name);
-                                    found = true;
-                                    return;
-                                }
-                            }
-                            walkConfirm(c, depth + 1);
-                        }
-                    } catch(e) {}
-                }
-                walkConfirm(stage, 0);
-                if (callback) callback(clicked);
-            }, 2000);
-        } catch(e) {
-            _caLog('ERR questBook approach: ' + e);
-            if (callback) callback(false);
-        }
-    }, 1500);
-}
 
 // ---- Accept a pending adventure invitation ----
 function _caAcceptAdventure(adv) {
@@ -860,7 +652,7 @@ function _caPoll() {
                 _caLog('Waiting for mail panel to render...');
             } else if (_caState.retries === 2) {
                 // Second poll (6s after select) — now click the accept button ONCE
-                _caLog('Clicking Accept button...');
+               
                 _caClickAcceptButton();
                 _caState.phase = 'accepting_mail_wait';
                 _caState.retries = 0;
@@ -906,8 +698,8 @@ function _caPoll() {
                     _caState.totalAttempts++;
 
                     if (_caState.totalAttempts >= 5) {
-                        _caLog('Failed after 5 full attempts. Trying Quest Book approach...');
-                        _caState.phase = 'accepting_questbook';
+                        _caLog('Failed after 5 full attempts. Trying accepting_mail_selectapproach...');
+                        _caState.phase = 'accepting_mail_select';
                         _caState.retries = 0;
                     } else {
                         _caLog('Attempt ' + _caState.totalAttempts + '/5 — reopening mail window...');
@@ -942,40 +734,7 @@ function _caPoll() {
             break;
 
         case 'accepting_questbook':
-            // Try to accept via Quest Book — scan quest pool and use finishQuest to open UI
-            if (_caState.retries === 0) {
-                _caState.retries = 1; // mark as in-progress so we don't re-trigger
-                _caAcceptViaQuestBook(_caState.mailVO, function(clicked) {
-                    // After quest book attempt, check if adventure appeared
-                    setTimeout(function() {
-                        var advs = _caGetAllAdventures();
-                        var myId3 = game.gi.mCurrentPlayer.GetPlayerId();
-                        var foundAdv = null;
-                        for (var ai = 0; ai < advs.length; ai++) {
-                            if (advs[ai].ownerPlayerID !== myId3) {
-                                foundAdv = advs[ai];
-                                break;
-                            }
-                        }
-                        if (foundAdv) {
-                            var advName = loca.GetText('ADN', foundAdv.adventureName) || foundAdv.adventureName;
-                            _caLog('Quest Book approach worked! Adventure: ' + advName);
-                            _caState = {
-                                phase: 'detected',
-                                advVO: foundAdv,
-                                advName: advName,
-                                buffName: _caState.buffName,
-                                startTime: Date.now(),
-                                retries: 0
-                            };
-                        } else {
-                            _caLog('Quest Book approach did not produce an adventure. Will retry on next poll.');
-                            _caState = null;
-                        }
-                        _caUpdateStatus();
-                    }, 3000);
-                });
-            }
+          
             // Don't do anything else — the callback handles state transition
             break;
 
