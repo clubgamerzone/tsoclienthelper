@@ -483,7 +483,7 @@ function _bsRenderData(groups) {
             }
 
             out += createTableRow([
-                [2, gotoIcon + '&nbsp;' + b.Name + ' Lv ' + (b.Level + 1)],
+                [2, gotoIcon + '&nbsp;' + b.Level + ': ' + (b.Name)],
                 [1, b.Produces || '—'],
                 [1, depositCell],
                 [2, '<span class="' + statusClass + '">' + statusLabel + '</span>'],

@@ -534,7 +534,7 @@ function _qrTotalOwned() {
 // ---- Unit type sort order ----
 var _qrUnitOrder = [
     'Recruit', 'Bowman', 'Militia', 'Cavalry', 'Longbowman',
-    'Soldier', 'Crossbowman', 'EliteSoldier', 'Cannon'
+    'Soldier', 'Crossbowman', 'EliteSoldier', 'Cannoneer'
 ];
 function _qrSortTypes(types) {
     return types.slice().sort(function (a, b) {
@@ -2093,9 +2093,16 @@ function _qrSaveCurrentFromUI() {
         var claimWaitSecs = parseInt($row.find('.qrCqWait').val(), 10) || 5;
         var targetGrid  = parseInt($row.attr('data-target-grid') || '0', 10) || 0;
         var scanEnemy   = parseInt($row.attr('data-scan-enemy')  || '0', 10) || 0;
+        var starItemType = $row.find('.qrBsStarTypeSel').val() || '';
+        var starAmount   = parseInt($row.find('.qrBsStarAmountInput').val(), 10) || 0;
         var stepObj = { type: type, generalUID: genUID, generalName: genName, buildingName: bldName, buildingKey: bldKey, buildingDisplay: bldDisp, army: armyData, seconds: seconds, claimWaitSecs: claimWaitSecs };
         if (targetGrid)  { stepObj.targetGrid  = targetGrid; }
         if (scanEnemy)   { stepObj.scanEnemy = scanEnemy; }
+        if (type === 'MOVE_TO_GRID' && $row.find('.qrBsMtgWait').is(':checked')) { stepObj.waitArrival = true; }
+        if (type === 'ADD_STAR_UNITS') {
+            if (starItemType) { stepObj.starItemType = starItemType; }
+            if (starAmount > 0) { stepObj.starAmount = starAmount; }
+        }
         newBs.push(stepObj);
     });
     profile.battleScript = newBs;
@@ -2912,9 +2919,11 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         CLAIM_QUESTS:     '#1a5c1a',
         COLLECT_ALL_QUESTS: '#6b5c1a',
         TRANSFER_TO_ENEMY_GARRISON: '#5c2a6b',
-        MOVE_TO_GRID: '#2b6b4a'
+        MOVE_TO_GRID: '#2b6b4a',
+        ADD_STAR_UNITS: '#5a3a8a',
+        ATTACK_GRID: '#8a1a1a'
     };
-    var needsGeneral  = ['MOVE', 'WAIT_ZONE', 'WAIT_AT_GARRISON', 'WAIT_ATTACKING', 'WAIT_GARRISON', 'ATTACK', 'WAIT_IDLE', 'UNLOAD', 'LOAD_ARMY', 'TRANSFER_TO_ENEMY_GARRISON', 'MOVE_TO_GRID'].indexOf(bsStep.type) >= 0;
+    var needsGeneral  = ['MOVE', 'WAIT_ZONE', 'WAIT_AT_GARRISON', 'WAIT_ATTACKING', 'WAIT_GARRISON', 'ATTACK', 'WAIT_IDLE', 'UNLOAD', 'LOAD_ARMY', 'TRANSFER_TO_ENEMY_GARRISON', 'MOVE_TO_GRID', 'ATTACK_GRID', 'ADD_STAR_UNITS'].indexOf(bsStep.type) >= 0;
     var isFillReturn  = bsStep.type === 'FILL_AND_RETURN';
     var needsArmy     = bsStep.type === 'LOAD_ARMY';
     var needsBuilding = ['MOVE', 'WAIT_GARRISON', 'ATTACK', 'TRANSFER_TO_ENEMY_GARRISON'].indexOf(bsStep.type) >= 0;
@@ -2941,6 +2950,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
     var ALL_TYPES = [
         ['MOVE',                       'MOVE \u2192 garrison'],
         ['ATTACK',                     'ATTACK \u00d7 building'],
+        ['ATTACK_GRID',                'ATTACK \u00d7 grid #'],
         ['TRANSFER_TO_ENEMY_GARRISON', 'TRANSFER \u2192 near enemy'],
         ['MOVE_TO_GRID',               'MOVE \u2192 grid #'],
         ['WAIT_ZONE',                  'WAIT \u2014 arrives on island'],
@@ -2955,7 +2965,8 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         ['FILL_AND_RETURN',            'FILL GENERALS \u2192 HOME'],
         ['CLAIM_QUESTS',               'COMPLETE QUEST'],
         ['COLLECT_ALL_QUESTS',         'COLLECT ALL + QUESTS'],
-        ['RETURN_HOME',                'RETURN TO ISLAND']
+        ['RETURN_HOME',                'RETURN TO ISLAND'],
+        ['ADD_STAR_UNITS',              'ADD STAR UNITS']
     ];
     ALL_TYPES.forEach(function (pair) {
         $('<option>').val(pair[0]).text(pair[1]).prop('selected', bsStep.type === pair[0]).appendTo($typeSel);
@@ -3406,229 +3417,100 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
             .val(bsStep.seconds || 5).appendTo($row);
     }
 
-    // MOVE_TO_GRID: x/y coordinate inputs + grid number + scan nearby empty cells
+    // MOVE_TO_GRID: grid number + wait arrival checkbox
     if (bsStep.type === 'MOVE_TO_GRID') {
-        // Resolve map width for x/y <-> grid conversion
-        var _mtgW = 0;
-        try { var _mtgSdm = game.gi.mCurrentPlayerZone.mStreetDataMap; _mtgW = _mtgSdm.mWidth || _mtgSdm.mMapWidth || _mtgSdm.mNumCols || 0; } catch (e) {}
-        if (!_mtgW) { try { var _mtgSdm2 = game.zone.mStreetDataMap; _mtgW = _mtgSdm2.mWidth || _mtgSdm2.mMapWidth || _mtgSdm2.mNumCols || 0; } catch (e) {} }
-        if (!_mtgW) { _mtgW = 89; }
-
         var _mtgInitGrid = bsStep.targetGrid || 0;
-        var _mtgInitX = _mtgInitGrid ? (_mtgInitGrid % _mtgW) : '';
-        var _mtgInitY = _mtgInitGrid ? Math.floor(_mtgInitGrid / _mtgW) : '';
-        var _mtgSyncing = false; // prevent feedback loops
 
-        $('<span>').css({ 'color': '#ccc', 'font-size': '11px', 'flex-shrink': '0' }).text('x:').appendTo($row);
-        var $mtgXInput = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
-                            'min': '0', 'placeholder': 'col' })
-            .css({ 'width': '60px', 'flex-shrink': '0' })
-            .val(_mtgInitX);
-        $mtgXInput.appendTo($row);
-
-        $('<span>').css({ 'color': '#ccc', 'font-size': '11px', 'flex-shrink': '0' }).text('y:').appendTo($row);
-        var $mtgYInput = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
-                            'min': '0', 'placeholder': 'row' })
-            .css({ 'width': '60px', 'flex-shrink': '0' })
-            .val(_mtgInitY);
-        $mtgYInput.appendTo($row);
-
-        $('<span>').css({ 'color': '#888', 'font-size': '10px', 'flex-shrink': '0' }).text('G:').appendTo($row);
+        $('<span>').css({ 'color': '#ccc', 'font-size': '11px', 'flex-shrink': '0' }).text('G:').appendTo($row);
         var $gridInput = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs qrBsGridInput',
                             'min': '1', 'placeholder': 'grid#' })
-            .css({ 'width': '80px', 'flex-shrink': '0', 'color': '#999', 'font-size': '11px' })
+            .css({ 'width': '90px', 'flex-shrink': '0', 'font-size': '11px' })
             .val(_mtgInitGrid || '');
-
-        // x/y → grid sync
-        function _mtgXYtoGrid() {
-            if (_mtgSyncing) return;
-            _mtgSyncing = true;
-            var xx = parseInt($mtgXInput.val(), 10), yy = parseInt($mtgYInput.val(), 10);
-            if (!isNaN(xx) && !isNaN(yy) && xx >= 0 && yy >= 0) {
-                var g = yy * _mtgW + xx;
-                $gridInput.val(g);
-                $row.attr('data-target-grid', g);
-            }
-            _mtgSyncing = false;
-        }
-        // grid → x/y sync
-        function _mtgGridToXY() {
-            if (_mtgSyncing) return;
-            _mtgSyncing = true;
-            var g = parseInt($gridInput.val(), 10);
-            if (g > 0) {
-                $mtgXInput.val(g % _mtgW);
-                $mtgYInput.val(Math.floor(g / _mtgW));
-                $row.attr('data-target-grid', g);
-            }
-            _mtgSyncing = false;
-        }
-
-        $mtgXInput.on('change input', _mtgXYtoGrid);
-        $mtgYInput.on('change input', _mtgXYtoGrid);
-        $gridInput.on('change input', _mtgGridToXY);
+        $gridInput.on('change input', function () {
+            var g = parseInt($(this).val(), 10) || 0;
+            $row.attr('data-target-grid', g);
+        });
         if (bsStep.targetGrid) { $row.attr('data-target-grid', bsStep.targetGrid); }
         $gridInput.appendTo($row);
 
-        // Scan sub-row: find safe cells (outside watch areas) near an enemy building
-        var $scanSub = $('<div>').css({
-            'flex-basis': '100%', 'width': '100%',
-            'border-top': '1px solid #555', 'padding-top': '4px', 'margin-top': '2px',
-            'display': 'flex', 'align-items': 'center', 'gap': '4px', 'flex-wrap': 'wrap'
+        // Wait-to-arrive checkbox
+        var _mtgWaitId = 'qrMtgWait_' + idx + '_' + Date.now();
+        var $mtgWaitChk = $('<input>').attr({ 'type': 'checkbox', 'class': 'qrBsMtgWait', 'id': _mtgWaitId })
+            .css({ 'flex-shrink': '0', 'margin': '0 2px 0 4px' });
+        if (bsStep.waitArrival) { $mtgWaitChk.prop('checked', true); }
+        $mtgWaitChk.appendTo($row);
+        $('<label>').attr('for', _mtgWaitId)
+            .css({ 'color': '#ccc', 'font-size': '11px', 'flex-shrink': '0', 'margin': '0', 'cursor': 'pointer' })
+            .text('wait arrival').appendTo($row);
+    }
+
+    // ATTACK_GRID: grid number + minimum army editor
+    if (bsStep.type === 'ATTACK_GRID') {
+        var _agInitGrid = bsStep.targetGrid || 0;
+        $('<span>').css({ 'color': '#ccc', 'font-size': '11px', 'flex-shrink': '0' }).text('G:').appendTo($row);
+        var $agGridInput = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs qrBsGridInput',
+                            'min': '1', 'placeholder': 'grid#' })
+            .css({ 'width': '90px', 'flex-shrink': '0', 'font-size': '11px' })
+            .val(_agInitGrid || '');
+        $agGridInput.on('change input', function () {
+            var g = parseInt($(this).val(), 10) || 0;
+            $row.attr('data-target-grid', g);
         });
-        $('<span>').css({ 'color': '#aaa', 'font-size': '11px' }).text('Enemy grid:').appendTo($scanSub);
-        var $mtgEnemyInput = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
-                            'placeholder': 'e.g. 1570' })
-            .css({ 'width': '90px', 'height': '28px', 'font-size': '13px' })
-            .val(bsStep.scanEnemy || '').appendTo($scanSub);
-        var $mtgScanBtn = $('<button>').text('Scan safe').attr('class', 'btn btn-xs btn-default')
-            .css({ 'flex-shrink': '0', 'font-size': '11px', 'height': '28px' }).appendTo($scanSub);
-        $('<span>').css({ 'color': '#aaa', 'font-size': '10px', 'margin-left': '2px' }).text('watch r:').appendTo($scanSub);
-        var $mtgWatchR = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
-                            'min': '1', 'max': '20', 'placeholder': '6' })
-            .css({ 'width': '42px', 'height': '28px', 'font-size': '13px' })
-            .val(bsStep.scanWatchR || 6).appendTo($scanSub);
-        $('<span>').css({ 'color': '#aaa', 'font-size': '10px' }).text('search r:').appendTo($scanSub);
-        var $mtgSearchR = $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs',
-                            'min': '1', 'max': '40', 'placeholder': '15' })
-            .css({ 'width': '42px', 'height': '28px', 'font-size': '13px' })
-            .val(bsStep.scanSearchR || 15).appendTo($scanSub);
-        var $mtgGridSel = $('<select>').attr('class', 'form-control input-xs')
-            .css({ 'width': '240px', 'height': '28px', 'font-size': '12px' });
-        if (bsStep.targetGrid) {
-            var _svX = bsStep.targetGrid % _mtgW, _svY = Math.floor(bsStep.targetGrid / _mtgW);
-            $('<option>').val(bsStep.targetGrid).text('x:' + _svX + ' y:' + _svY + ' G:' + bsStep.targetGrid + ' (saved)').prop('selected', true).appendTo($mtgGridSel);
-        } else {
-            $('<option>').val('').text('\u2014 click Scan safe \u2014').appendTo($mtgGridSel);
-        }
-        $mtgGridSel.on('change', function () {
-            var v = parseInt($(this).val(), 10) || '';
-            $gridInput.val(v).trigger('change');
+        if (bsStep.targetGrid) { $row.attr('data-target-grid', bsStep.targetGrid); }
+        $agGridInput.appendTo($row);
+
+        // Army editor (sub-row)
+        var agArmyObj = bsStep.army || {};
+        var $agSub = $('<div>').css({ 'flex-basis': '100%', 'width': '100%',
+                                       'border-top': '1px solid #555', 'padding-top': '4px', 'margin-top': '2px' });
+        $('<div>').css({ 'font-size': '10px', 'color': '#f0a030', 'margin-bottom': '3px', 'font-weight': 'bold' })
+            .text('Minimum army (load if below):').appendTo($agSub);
+        _qrUnitOrder.forEach(function (type) {
+            var $uRow    = $('<div>').css({ 'display': 'table', 'width': '100%', 'margin-bottom': '2px' });
+            var $icCell  = $('<div>').css({ 'display': 'table-cell', 'width': '16px', 'vertical-align': 'middle' });
+            var $lblCell = $('<div>').css({ 'display': 'table-cell', 'width': '90px', 'vertical-align': 'middle',
+                                           'color': '#ccc', 'font-size': '10px', 'padding-left': '3px' }).text(type);
+            var $inCell  = $('<div>').css({ 'display': 'table-cell', 'vertical-align': 'middle' });
+            try { $icCell.append($(getImageTag(type, '12px', '12px'))); } catch (e) {}
+            $inCell.append($('<input>', {
+                type: 'number', 'class': 'qrBsArmyInput', 'data-type': type, min: 0,
+                style: 'width:60px;padding:1px 3px;font-size:10px;color:#000;background:#fff;'
+            }).val(agArmyObj[type] || 0));
+            $uRow.append($icCell).append($lblCell).append($inCell);
+            $agSub.append($uRow);
         });
-        $mtgGridSel.appendTo($scanSub);
+        $row.append($agSub);
+    }
 
-        // Show on map button
-        var $mtgShowBtn = $('<button>').text('\uD83D\uDCCD').attr('class', 'btn btn-xs btn-default')
-            .css({ 'flex-shrink': '0', 'font-size': '12px', 'padding': '2px 6px', 'height': '28px' })
-            .attr('title', 'Scroll map to selected cell');
-        $mtgShowBtn.on('click', function () {
-            var showG = parseInt($mtgGridSel.val(), 10) || parseInt($gridInput.val(), 10);
-            if (showG > 0) {
-                try { game.zone.ScrollToGrid(showG); } catch (e) {}
-                game.chatMessage('Showing grid:' + showG + ' on map', 'adventurer');
-            }
-        });
-        $mtgShowBtn.appendTo($scanSub);
-
-        // Scan logic — finds free cells outside all enemy watch areas
-        $mtgScanBtn.on('click', function () {
-            var enemyG = parseInt($mtgEnemyInput.val(), 10);
-            if (!enemyG || enemyG < 1) {
-                $mtgGridSel.empty();
-                $('<option>').val('').text('\u2014 enter an enemy grid \u2014').appendTo($mtgGridSel);
-                return;
-            }
-            $mtgGridSel.empty();
-            $('<option>').val('').text('scanning\u2026').appendTo($mtgGridSel);
-            $row.attr('data-scan-enemy', enemyG);
-
-            // Resolve map width
-            var w = _mtgW;
-
-            var WATCH_R  = parseInt($mtgWatchR.val(), 10) || 6;
-            var SEARCH_R = parseInt($mtgSearchR.val(), 10) || 15;
-
-            var enemyRow = Math.floor(enemyG / w), enemyCol = enemyG % w;
-
-            // Collect ALL enemy building grids (for watch area check)
-            var enemyGrids = [];
-            try {
-                game.zone.mStreetDataMap.GetBuildings_vector().forEach(function (b) {
-                    if (!b) { return; }
-                    try {
-                        if (b.IsReadyToIntercept == null) { return; } // not a combat building
-                        var bg = typeof b.GetGrid === 'function' ? b.GetGrid() : 0;
-                        if (bg > 0) { enemyGrids.push({ g: bg, r: Math.floor(bg / w), c: bg % w }); }
-                    } catch (e) {}
-                });
-            } catch (e) {}
-
-            game.chatMessage('SCAN: enemy=' + enemyG + ' watchR=' + WATCH_R + ' searchR=' + SEARCH_R + ' enemies=' + enemyGrids.length, 'adventurer');
-
-            // Get pathfinder origin from the enemy building
-            var pathOrigin = -1;
-            try {
-                var refBld = game.zone.mStreetDataMap.GetBuildingByGridPos(enemyG);
-                if (!refBld) { refBld = game.zone.GetBuildingFromGridPosition(enemyG); }
-                if (refBld) { pathOrigin = refBld.GetStreetGridEntry(); }
-            } catch (e) {}
-            if (pathOrigin < 0) { pathOrigin = enemyG; }
-
-            function isCellFree(g) {
-                try { return !game.zone.GetBuildingFromGridPosition(g); } catch (e) {}
-                return false;
-            }
-
-            function isReachable(g) {
+    // ADD_STAR_UNITS: type dropdown + amount input
+    if (bsStep.type === 'ADD_STAR_UNITS') {
+        $('<span>').css({ 'color': '#ccc', 'font-size': '11px', 'flex-shrink': '0' }).text('item:').appendTo($row);
+        var $asuTypeSel = $('<select>').attr('class', 'form-control input-xs qrBsStarTypeSel')
+            .css({ 'width': '180px', 'flex-shrink': '0', 'font-size': '11px' });
+        $('<option>').val('').text('— select —').appendTo($asuTypeSel);
+        try {
+            var asuSeen = {};
+            game.gi.mCurrentPlayer.mAvailableBuffs_vector.forEach(function (item) {
                 try {
-                    var path = game.gi.mPathFinder.CalculatePath(pathOrigin, g, null, true);
-                    return path && path.pathLenX10000 > 0;
+                    var rn = item.GetResourceName_string();
+                    if (!rn || asuSeen[rn]) { return; }
+                    // Only show Recruit-type star items
+                    if (rn.toLowerCase().indexOf('recruit') < 0) { return; }
+                    asuSeen[rn] = true;
+                    $('<option>').val(rn).text(rn).prop('selected', bsStep.starItemType === rn).appendTo($asuTypeSel);
                 } catch (e) {}
-                return false;
-            }
+            });
+        } catch (e) {}
+        if (bsStep.starItemType && !asuSeen[bsStep.starItemType]) {
+            $('<option>').val(bsStep.starItemType).text(bsStep.starItemType + ' (not in inventory)').prop('selected', true).appendTo($asuTypeSel);
+        }
+        $asuTypeSel.appendTo($row);
 
-            // Chebyshev distance: max(|dr|, |dc|) — matches the diamond-shaped watch areas
-            function minEnemyDist(cr, cc) {
-                var minD = 9999;
-                for (var ei = 0; ei < enemyGrids.length; ei++) {
-                    var d = Math.max(Math.abs(cr - enemyGrids[ei].r), Math.abs(cc - enemyGrids[ei].c));
-                    if (d < minD) { minD = d; }
-                }
-                return minD;
-            }
-
-            var results = [];
-            for (var dr = -SEARCH_R; dr <= SEARCH_R; dr++) {
-                for (var dc = -SEARCH_R; dc <= SEARCH_R; dc++) {
-                    var cr = enemyRow + dr, cc = enemyCol + dc;
-                    if (cr < 1 || cc < 1 || cc >= w - 1) { continue; }
-                    var g = cr * w + cc;
-                    // Must be outside ALL enemy watch areas
-                    var eDist = minEnemyDist(cr, cc);
-                    if (eDist < WATCH_R) { continue; }
-                    // Check 3x3 area has no buildings
-                    var allFree = true;
-                    for (var ar = -1; ar <= 1 && allFree; ar++) {
-                        for (var ac = -1; ac <= 1 && allFree; ac++) {
-                            if (!isCellFree((cr + ar) * w + (cc + ac))) { allFree = false; }
-                        }
-                    }
-                    if (!allFree) { continue; }
-                    // Verify reachable (not water/mountains)
-                    if (!isReachable(g)) { continue; }
-                    var distToTarget = Math.abs(dr) + Math.abs(dc);
-                    results.push({ grid: g, row: cr, col: cc, dist: distToTarget, eDist: eDist });
-                }
-            }
-            results.sort(function (a, b) { return a.dist - b.dist; });
-
-            $mtgGridSel.empty();
-            $('<option>').val('').text('\u2014 ' + results.length + ' safe cells (watchR=' + WATCH_R + ') \u2014').appendTo($mtgGridSel);
-            var shown = Math.min(results.length, 50);
-            for (var i = 0; i < shown; i++) {
-                var sr = results[i];
-                $('<option>').val(sr.grid)
-                    .text('x:' + sr.col + ' y:' + sr.row + ' G:' + sr.grid + '  d=' + sr.dist + ' (safe ' + sr.eDist + ')')
-                    .appendTo($mtgGridSel);
-            }
-            if (results.length === 0) {
-                $('<option>').val('').text('no safe cells found \u2014 try larger search r or smaller watch r').appendTo($mtgGridSel);
-            }
-            game.chatMessage('SCAN: found ' + results.length + ' safe cells outside watch areas', 'adventurer');
-        });
-
-        $row.append($scanSub);
-        if (bsStep.scanEnemy) { $row.attr('data-scan-enemy', bsStep.scanEnemy); }
+        $('<span>').css({ 'color': '#ccc', 'font-size': '11px', 'flex-shrink': '0' }).text('amount:').appendTo($row);
+        $('<input>').attr({ 'type': 'number', 'class': 'form-control input-xs qrBsStarAmountInput',
+                            'min': '1', 'placeholder': '1' })
+            .css({ 'width': '70px', 'flex-shrink': '0' })
+            .val(bsStep.starAmount || 1).appendTo($row);
     }
 
     // CLAIM_QUESTS: pause-and-wait seconds input
@@ -3750,7 +3632,8 @@ function _qrBsUpdateStepProgress(idx, steps) {
         LOAD_ARMY: 'LOAD ARMY',               DELAY: 'DELAY',
         COLLECTIBLES: 'COLLECT',              FILL_AND_RETURN: 'FILL \u2192 HOME',
         CLAIM_QUESTS: 'CLAIM QUEST REWARDS',  TRANSFER_TO_ENEMY_GARRISON: 'TRANSFER \u2192 near enemy',
-        MOVE_TO_GRID: 'MOVE \u2192 grid'
+        MOVE_TO_GRID: 'MOVE \u2192 grid',     ADD_STAR_UNITS: 'ADD STAR UNITS',
+        ATTACK_GRID: 'ATTACK \u2192 grid'
     };
     function fmt(i) {
         if (i < 0 || i >= steps.length) { return null; }
@@ -4843,20 +4726,30 @@ function _qrRunBattleScript(startIdx) {
                     game.gi.mCurrentCursor.mCurrentSpecialist = spec;
                     game.gi.SendServerAction(95, 4, mtgGrid, 0, mtgTask);
                     game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' \u2192 grid:' + mtgGrid, 'adventurer');
-                    // Poll until general has left original position
+                    var mtgWaitArrival = !!step.waitArrival;
+                    // Poll until general has left original position (or arrived if waitArrival)
                     setTimeout(function () {
                         var mtgTick = 0;
+                        var mtgMaxTicks = mtgWaitArrival ? 90 : 15; // ~3min vs ~30s
                         var mtgIv = setInterval(function () {
                             if (state.stopped) { clearInterval(mtgIv); return; }
                             mtgTick++;
-                            if (mtgTick > 15) {
+                            if (mtgTick > mtgMaxTicks) {
                                 clearInterval(mtgIv);
-                                game.chatMessage('MOVE_TO_GRID: timeout — ' + mtgGenName + ' did not move (grid may be blocked).', 'adventurer');
+                                game.chatMessage('MOVE_TO_GRID: timeout — ' + mtgGenName + ' did not ' + (mtgWaitArrival ? 'arrive' : 'move') + ' (grid may be blocked).', 'adventurer');
                                 setTimeout(runNextStep, 1000); return;
                             }
                             try {
                                 var s = _qrFindSpecByUID(mtgGenUID);
-                                if (s && s.GetGarrisonGridIdx() !== mtgOrigGrid) {
+                                if (!s) { return; }
+                                var curG = s.GetGarrisonGridIdx();
+                                if (mtgWaitArrival) {
+                                    if (curG === mtgGrid) {
+                                        clearInterval(mtgIv);
+                                        game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' arrived at grid:' + mtgGrid, 'adventurer');
+                                        setTimeout(runNextStep, 1000);
+                                    }
+                                } else if (curG !== mtgOrigGrid) {
                                     clearInterval(mtgIv);
                                     game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' is moving to grid:' + mtgGrid, 'adventurer');
                                     setTimeout(runNextStep, 1000);
@@ -4864,6 +4757,156 @@ function _qrRunBattleScript(startIdx) {
                             } catch (e) { clearInterval(mtgIv); finish('MOVE_TO_GRID error: ' + e); }
                         }, 2000);
                     }, 2000);
+                    break;
+                }
+
+                case 'ADD_STAR_UNITS': {
+                    var asuType   = step.starItemType || '';
+                    var asuAmount = step.starAmount || 0;
+                    if (!asuType)   { game.chatMessage('ADD_STAR_UNITS: no item type set \u2014 skipping.', 'adventurer'); setTimeout(runNextStep, 500); break; }
+                    if (asuAmount <= 0) { game.chatMessage('ADD_STAR_UNITS: amount must be > 0 \u2014 skipping.', 'adventurer'); setTimeout(runNextStep, 500); break; }
+                    var asuItem = null;
+                    try {
+                        game.gi.mCurrentPlayer.mAvailableBuffs_vector.forEach(function (it) {
+                            try { if (!asuItem && it.GetResourceName_string() === asuType) { asuItem = it; } } catch (e) {}
+                        });
+                    } catch (e) {}
+                    if (!asuItem) { game.chatMessage('ADD_STAR_UNITS: ' + asuType + ' not in inventory \u2014 skipping.', 'adventurer'); setTimeout(runNextStep, 500); break; }
+                    if (!spec) { game.chatMessage('ADD_STAR_UNITS: general not found \u2014 skipping.', 'adventurer'); setTimeout(runNextStep, 500); break; }
+                    var asuGrid = (spec && spec.GetGarrisonGridIdx) ? spec.GetGarrisonGridIdx() : 0;
+                    var asuUid  = asuItem.GetUniqueId();
+                    try {
+                        game.gi.SendServerAction(61, 0, asuGrid, asuAmount, asuUid);
+                        game.chatMessage('ADD_STAR_UNITS: ' + asuType + ' \u00d7 ' + asuAmount + (asuGrid ? (' @ grid ' + asuGrid) : ''), 'adventurer');
+                    } catch (e) {
+                        game.chatMessage('ADD_STAR_UNITS error: ' + e, 'adventurer');
+                    }
+                    setTimeout(runNextStep, 1500);
+                    break;
+                }
+
+                case 'ATTACK_GRID': {
+                    var agGrid = (step.targetGrid && step.targetGrid > 0) ? step.targetGrid : 0;
+                    if (!agGrid) { game.chatMessage('ATTACK_GRID: no grid number set \u2014 skipping.', 'adventurer'); setTimeout(runNextStep, 500); break; }
+                    if (!spec)   { game.chatMessage('ATTACK_GRID: general not found \u2014 skipping.', 'adventurer'); setTimeout(runNextStep, 500); break; }
+
+                    var agSpecUID = step.generalUID;
+                    var agMinArmy = step.army || {};
+                    var agMinKeys = Object.keys(agMinArmy).filter(function (k) { return agMinArmy[k] > 0; });
+
+                    function agGetShortfall() {
+                        var sp = _qrFindSpecByUID(agSpecUID);
+                        if (!sp) { return ['general not found']; }
+                        var cur = {};
+                        try {
+                            sp.GetArmy().GetSquadsCollection_vector().forEach(function (sq) {
+                                var t = sq.GetType ? sq.GetType() : '';
+                                var a = sq.GetAmount ? sq.GetAmount() : 0;
+                                if (t) { cur[t] = (cur[t] || 0) + a; }
+                            });
+                        } catch (e) {}
+                        return agMinKeys.filter(function (t) { return (cur[t] || 0) < agMinArmy[t]; });
+                    }
+
+                    function agLoadArmy(onDone) {
+                        var sp = _qrFindSpecByUID(agSpecUID);
+                        if (!sp) { setTimeout(onDone, 2000); return; }
+                        try {
+                            var frLoad = new dRaiseArmyVODef();
+                            frLoad.armyHolderSpecialistVO = sp.CreateSpecialistVOFromSpecialist();
+                            agMinKeys.forEach(function (t) {
+                                var dRes = new dResourceVODef();
+                                dRes.name_string = t;
+                                dRes.amount = agMinArmy[t];
+                                frLoad.unitSquads.addItem(dRes);
+                            });
+                            game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, frLoad, armyResponder);
+                        } catch (e) { game.chatMessage('ATTACK_GRID: load army error: ' + e, 'adventurer'); setTimeout(onDone, 2000); return; }
+                        var laWait = 0;
+                        var ivLoad = setInterval(function () {
+                            if (state.stopped) { clearInterval(ivLoad); return; }
+                            laWait++;
+                            if (laWait > 10 || agGetShortfall().length === 0) {
+                                clearInterval(ivLoad);
+                                onDone();
+                            }
+                        }, 1000);
+                    }
+
+                    function agUnloadAll(onDone) {
+                        var profileUIDs = {};
+                        (profile.steps || []).forEach(function (s) { if (s.generalUID) { profileUIDs[s.generalUID] = true; } });
+                        var q = new TimedQueue(1200);
+                        Object.keys(profileUIDs).forEach(function (uid) {
+                            q.add(function () {
+                                var s = _qrFindSpecByUID(uid);
+                                if (!s) { return; }
+                                try {
+                                    var uo = new dRaiseArmyVODef();
+                                    uo.armyHolderSpecialistVO = s.CreateSpecialistVOFromSpecialist();
+                                    game.gi.mClientMessages.SendMessagetoServer(1031, game.gi.mCurrentViewedZoneID, uo, armyResponder);
+                                } catch (e) {}
+                            });
+                        });
+                        q.add(function () { setTimeout(onDone, 1000); });
+                        q.run();
+                    }
+
+                    function agSendAttack() {
+                        var sp = _qrFindSpecByUID(agSpecUID);
+                        if (!sp) { finish('ATTACK_GRID: general not found during retry'); return; }
+                        var stask = new armySpecTaskDef();
+                        stask.uniqueID  = sp.GetUniqueID();
+                        stask.subTaskID = 0;
+                        game.gi.mCurrentCursor.mCurrentSpecialist = sp;
+                        game.gi.SendServerAction(95, 5, agGrid, 0, stask);
+                    }
+
+                    function agDoAttack() {
+                        var agSpec0 = _qrFindSpecByUID(agSpecUID);
+                        var agOrigGrid = agSpec0 ? agSpec0.GetGarrisonGridIdx() : -1;
+                        agSendAttack();
+                        game.chatMessage('ATTACK_GRID: ' + genName + ' \u2192 grid:' + agGrid + ' (waiting for departure\u2026)', 'adventurer');
+                        var agTicks = 0;
+                        var ivAg = setInterval(function () {
+                            if (state.stopped) { clearInterval(ivAg); return; }
+                            try {
+                                var sp2 = _qrFindSpecByUID(agSpecUID);
+                                if (sp2 && sp2.GetGarrisonGridIdx() !== agOrigGrid) {
+                                    clearInterval(ivAg);
+                                    game.chatMessage('ATTACK_GRID: ' + genName + ' attack accepted.', 'adventurer');
+                                    setTimeout(runNextStep, 500);
+                                    return;
+                                }
+                                agTicks++;
+                                if (agTicks > 60) { // ~30s
+                                    clearInterval(ivAg);
+                                    game.chatMessage('ATTACK_GRID: timeout \u2014 ' + genName + ' did not depart (route blocked?)', 'adventurer');
+                                    setTimeout(runNextStep, 1000);
+                                }
+                            } catch (e) { clearInterval(ivAg); finish('ATTACK_GRID poll error: ' + e); }
+                        }, 500);
+                    }
+
+                    if (agMinKeys.length === 0) {
+                        agDoAttack();
+                    } else {
+                        var agSf0 = agGetShortfall();
+                        if (agSf0.length === 0) {
+                            agDoAttack();
+                        } else {
+                            game.chatMessage('ATTACK_GRID: ' + genName + ' below minimum (' + agSf0.join(', ') + ') \u2014 unloading all + reloading\u2026', 'adventurer');
+                            agUnloadAll(function () {
+                                agLoadArmy(function () {
+                                    var agSf1 = agGetShortfall();
+                                    if (agSf1.length > 0) {
+                                        game.chatMessage('ATTACK_GRID: still short (' + agSf1.join(', ') + ') \u2014 attacking anyway.', 'adventurer');
+                                    }
+                                    agDoAttack();
+                                });
+                            });
+                        }
+                    }
                     break;
                 }
 
