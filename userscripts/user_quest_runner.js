@@ -108,6 +108,7 @@ var _qrGeneralsCollapsed   = false;  // collapsed state for Generals section
 var _qrBattleFlowCollapsed = false;  // collapsed state for Battle Flow section
 var _qrScrollToBsIdx       = -1;    // battle-script step index to scroll to after render (-1 = no scroll)
 var _qrScrollToGenIdx      = -1;    // generals step index to scroll to after render (-1 = no scroll)
+var _qrScrollToBottom      = '';    // 'bs' = scroll to last battle-flow step, 'gen' = last generals step, '' = no scroll
 var _qrBsStopFlag          = false; // global stop flag — backup for state.stopped
 var _qrBsRepeat            = false; // repeat adventure after all steps complete
 var _qrRepeatIntervalId    = null;  // setInterval handle for the repeat-wait poll
@@ -311,11 +312,46 @@ function _qrSaveOne(profile) {
     var json = JSON.stringify(profile, null, '  ');
     try {
         var pf = _qrProfileFileFor(profile);
+
+        // Auto-backup: before overwriting, copy existing file into backups/<name>/<timestamp>.json
+        // Keeps the last 20 versions per profile, then rotates oldest out.
+        try {
+            if (pf.exists) {
+                var dir = _qrProfileDir();
+                var backupRoot = dir.resolvePath('backups');
+                if (!backupRoot.exists) { backupRoot.createDirectory(); }
+                var safeName = (profile.name || 'profile').replace(/[<>:"/\\|?*]/g, '_');
+                var profDir = backupRoot.resolvePath(safeName);
+                if (!profDir.exists) { profDir.createDirectory(); }
+                var d = new Date();
+                var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+                var ts = d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+                         '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+                var bf = profDir.resolvePath(ts + '.json');
+                pf.copyTo(bf, true);
+                // Rotate: keep most recent 20 only
+                try {
+                    var entries = profDir.getDirectoryListing();
+                    var jsons = [];
+                    for (var ei = 0; ei < entries.length; ei++) {
+                        var en = entries[ei];
+                        if (!en.isDirectory && /\.json$/i.test(en.name)) { jsons.push(en); }
+                    }
+                    jsons.sort(function (a, b) { return a.name < b.name ? 1 : a.name > b.name ? -1 : 0; });
+                    for (var ki = 20; ki < jsons.length; ki++) {
+                        try { jsons[ki].deleteFile(); } catch (eDel) {}
+                    }
+                } catch (eRot) {}
+            }
+        } catch (eBk) {
+            game.chatMessage('Quest Runner: backup warning: ' + eBk, 'adventurer');
+        }
+
         var fs = new air.FileStream();
         fs.open(pf, air.FileMode.WRITE);
         fs.writeUTFBytes(json);
         fs.close();
-        game.chatMessage('Quest Runner: saved "' + profile.name + '" → ' + pf.nativePath, 'adventurer');
+        game.chatMessage('Quest Runner: saved "' + profile.name + '" \u2192 ' + pf.nativePath, 'adventurer');
     } catch (e) {
         game.chatMessage('Quest Runner: save error for "' + profile.name + '": ' + e, 'adventurer');
     }
@@ -1265,10 +1301,35 @@ function _qrTryInviteFriend(friendId, friendName, zoneId, advKey) {
 
 // ---- Editor (right panel) ----
 function _qrRenderEditor() {
-    // Preserve scroll position across re-renders
-    var $scrollParent = $('#questRunnerModalData').closest('.modal-body');
-    if (!$scrollParent.length) { $scrollParent = $('#questRunnerModalData'); }
+    // Preserve scroll position across re-renders. Find the actual scrollable ancestor
+    // (not all modals scroll on .modal-body — some scroll on a wrapper or even window).
+    var $scrollParent = $();
+    var candidates = [
+        $('#questRunnerModalData').closest('.modal-body'),
+        $('#questRunnerModalData').parents().filter(function () {
+            var ov = $(this).css('overflow-y');
+            return (ov === 'auto' || ov === 'scroll') && this.scrollHeight > this.clientHeight;
+        }).first(),
+        $('#questRunnerModalData')
+    ];
+    // Pick the first candidate that exists AND can actually scroll. Prefer one already scrolled.
+    for (var ci = 0; ci < candidates.length; ci++) {
+        var $c = candidates[ci];
+        if (!$c || !$c.length) { continue; }
+        var el = $c[0];
+        var canScroll = el.scrollHeight > el.clientHeight + 1;
+        if (canScroll) {
+            $scrollParent = $c;
+            break;
+        }
+    }
+    // Fallback: if none can scroll yet (initial render), use modal-body anyway
+    if (!$scrollParent.length && candidates[0] && candidates[0].length) {
+        $scrollParent = candidates[0];
+    }
     var savedScroll = $scrollParent.length ? $scrollParent.scrollTop() : 0;
+    // Also save window scroll as fallback
+    var savedWinScroll = $(window).scrollTop();
 
     var $ed = $('#qrEditor').html('');
 
@@ -1690,7 +1751,7 @@ function _qrRenderEditor() {
         .click(function () {
             _qrSaveCurrentFromUI();
             profile.steps.push(_qrNewStep());
-            _qrScrollToGenIdx = profile.steps.length - 1;
+            _qrScrollToBottom = 'gen';
             _qrRenderEditor();
         })
         .appendTo($genBody);
@@ -1712,20 +1773,43 @@ function _qrRenderEditor() {
 
     // Auto-scroll to the targeted step after render, or restore previous scroll position
     setTimeout(function () {
-        if (_qrScrollToBsIdx >= 0) {
+        if (_qrScrollToBottom) {
+            var sel = (_qrScrollToBottom === 'bs') ? '#qrBsSteps .qrBsStep:last' : '#qrSteps .qrStep:last';
+            _qrScrollToBottom = '';
+            // Defer one more frame so layout is settled
+            setTimeout(function () {
+                if (!$scrollParent || !$scrollParent.length) { return; }
+                var $tgt = $(sel);
+                var spEl = $scrollParent[0];
+                if ($tgt.length) {
+                    var btmTop = $tgt.offset().top - $scrollParent.offset().top + $scrollParent.scrollTop();
+                    var dest  = btmTop - $scrollParent.height() / 2;
+                    var maxS  = spEl.scrollHeight - spEl.clientHeight;
+                    if (dest > maxS) { dest = maxS; }
+                    if (dest < 0) { dest = 0; }
+                    $scrollParent.stop(true).animate({ scrollTop: dest }, 200);
+                } else {
+                    $scrollParent.stop(true).animate({ scrollTop: spEl.scrollHeight }, 200);
+                }
+            }, 30);
+        } else if (_qrScrollToBsIdx >= 0) {
             var $target = $('#qrBsSteps .qrBsStep[data-idx="' + _qrScrollToBsIdx + '"]');
             if ($target.length && $scrollParent.length) {
-                $scrollParent.animate({ scrollTop: $scrollParent.scrollTop() + $target.position().top - $scrollParent.height() / 3 }, 200);
+                var targetTop = $target.offset().top - $scrollParent.offset().top + $scrollParent.scrollTop();
+                $scrollParent.animate({ scrollTop: targetTop - $scrollParent.height() / 3 }, 200);
             }
             _qrScrollToBsIdx = -1;
         } else if (_qrScrollToGenIdx >= 0) {
             var $genTarget = $('#qrSteps .qrStep[data-idx="' + _qrScrollToGenIdx + '"]');
             if ($genTarget.length && $scrollParent.length) {
-                $scrollParent.animate({ scrollTop: $scrollParent.scrollTop() + $genTarget.position().top - $scrollParent.height() / 3 }, 200);
+                var genTop = $genTarget.offset().top - $scrollParent.offset().top + $scrollParent.scrollTop();
+                $scrollParent.animate({ scrollTop: genTop - $scrollParent.height() / 3 }, 200);
             }
             _qrScrollToGenIdx = -1;
         } else if (savedScroll > 0 && $scrollParent.length) {
             $scrollParent.scrollTop(savedScroll);
+        } else if (savedWinScroll > 0) {
+            $(window).scrollTop(savedWinScroll);
         }
     }, 50);
 }
@@ -2844,7 +2928,6 @@ function _qrRenderBattleScript($ed, profile) {
             _qrSaveCurrentFromUI();
             var prevLen = profile.battleScript.length;
             _qrBsSnapshot(profile);
-            _qrScrollToBsIdx = prevLen;
             _qrRenderEditor();
         }).appendTo($hdr);
     $('<button>').attr({ 'class': 'btn btn-xs btn-success', 'id': 'qrBsRunBtn' })
@@ -2893,7 +2976,7 @@ function _qrRenderBattleScript($ed, profile) {
         .click(function () {
             _qrSaveCurrentFromUI();
             profile.battleScript.push(_qrBsNewStep('MOVE'));
-            _qrScrollToBsIdx = profile.battleScript.length - 1;
+            _qrScrollToBottom = 'bs';
             _qrRenderEditor();
         }).appendTo($addRow);
     $wrap.append($addRow);
@@ -2976,7 +3059,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         $row.attr('data-type', newType);        // keep data-type in sync for any mid-change save
         _qrSaveCurrentFromUI();
         profile.battleScript[idx].type = newType;
-        _qrScrollToBsIdx = idx;
+        // Don't reposition: leave _qrScrollToBsIdx = -1 so existing scroll is restored
         _qrRenderEditor();
     });
     $row.append($typeSel);
@@ -3539,7 +3622,6 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
                 _qrSaveCurrentFromUI();
                 var a = profile.battleScript;
                 a.unshift(a.splice(idx, 1)[0]);
-                _qrScrollToBsIdx = 0;
                 _qrRenderEditor();
             }).appendTo($row);
         $('<button>').attr('class', 'btn btn-xs btn-default').text('\u2191')
@@ -3547,7 +3629,6 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
                 _qrSaveCurrentFromUI();
                 var a = profile.battleScript;
                 var t = a[idx - 1]; a[idx - 1] = a[idx]; a[idx] = t;
-                _qrScrollToBsIdx = idx - 1;
                 _qrRenderEditor();
             }).appendTo($row);
     }
@@ -3557,7 +3638,6 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
                 _qrSaveCurrentFromUI();
                 var a = profile.battleScript;
                 var t = a[idx + 1]; a[idx + 1] = a[idx]; a[idx] = t;
-                _qrScrollToBsIdx = idx + 1;
                 _qrRenderEditor();
             }).appendTo($row);
         $('<button>').attr('class', 'btn btn-xs btn-default').attr('title', 'Move to bottom').text('\u21d3')
@@ -3565,7 +3645,6 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
                 _qrSaveCurrentFromUI();
                 var a = profile.battleScript;
                 a.push(a.splice(idx, 1)[0]);
-                _qrScrollToBsIdx = profile.battleScript.length - 1;
                 _qrRenderEditor();
             }).appendTo($row);
     }
@@ -3579,7 +3658,6 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         .click(function () {
             _qrSaveCurrentFromUI();
             profile.battleScript.splice(idx, 1);
-            _qrScrollToBsIdx = Math.min(idx, profile.battleScript.length - 1);
             _qrRenderEditor();
         }).appendTo($row);
     $('<button>').attr('class', 'btn btn-xs btn-default').attr('title', 'Add step below').text('+ Add step below')
@@ -3587,7 +3665,7 @@ function _qrMakeBsStepRow(bsStep, idx, profile) {
         .click(function () {
             _qrSaveCurrentFromUI();
             profile.battleScript.splice(idx + 1, 0, _qrBsNewStep('MOVE'));
-            _qrScrollToBsIdx = idx + 1;
+            _qrScrollToBottom = 'bs';
             _qrRenderEditor();
         }).appendTo($row);
 
@@ -4743,13 +4821,14 @@ function _qrRunBattleScript(startIdx) {
                                 var s = _qrFindSpecByUID(mtgGenUID);
                                 if (!s) { return; }
                                 var curG = s.GetGarrisonGridIdx();
-                                if (mtgWaitArrival) {
-                                    if (curG === mtgGrid) {
-                                        clearInterval(mtgIv);
-                                        game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' arrived at grid:' + mtgGrid, 'adventurer');
-                                        setTimeout(runNextStep, 1000);
-                                    }
-                                } else if (curG !== mtgOrigGrid) {
+                                // Arrival check works for both modes: if general is at target, we're done.
+                                if (curG === mtgGrid) {
+                                    clearInterval(mtgIv);
+                                    game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' is at grid:' + mtgGrid, 'adventurer');
+                                    setTimeout(runNextStep, 1000);
+                                    return;
+                                }
+                                if (!mtgWaitArrival && mtgOrigGrid > 0 && curG !== mtgOrigGrid) {
                                     clearInterval(mtgIv);
                                     game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' is moving to grid:' + mtgGrid, 'adventurer');
                                     setTimeout(runNextStep, 1000);
@@ -4852,27 +4931,95 @@ function _qrRunBattleScript(startIdx) {
                         q.run();
                     }
 
+                    // Wait for all profile generals to be at their garrison (idle), with timeout
+                    function agWaitAllAtGarrison(onDone) {
+                        var profileUIDs = {};
+                        (profile.steps || []).forEach(function (s) { if (s.generalUID) { profileUIDs[s.generalUID] = true; } });
+                        var uids = Object.keys(profileUIDs);
+                        if (uids.length === 0) { setTimeout(onDone, 200); return; }
+                        var maxTicks = 240; // ~6 minutes @ 1500ms
+                        var tick = 0;
+                        var iv = setInterval(function () {
+                            if (state.stopped) { clearInterval(iv); return; }
+                            tick++;
+                            var allReady = true;
+                            var pending = [];
+                            for (var i = 0; i < uids.length; i++) {
+                                var s = _qrFindSpecByUID(uids[i]);
+                                if (!s) { continue; } // missing spec — skip
+                                try {
+                                    var atGarr = s.GetGarrison && s.GetGarrison() != null;
+                                    var hasTask = s.GetTask && s.GetTask() != null;
+                                    if (!atGarr || hasTask) {
+                                        allReady = false;
+                                        var nm = uids[i];
+                                        try { nm = s.getName(false).replace(/<[^>]+>/g, ''); } catch (e) {}
+                                        pending.push(nm);
+                                    }
+                                } catch (e) { allReady = false; }
+                            }
+                            if (allReady) {
+                                clearInterval(iv);
+                                onDone(true);
+                                return;
+                            }
+                            if (tick % 10 === 0) {
+                                game.chatMessage('ATTACK_GRID: waiting for generals at garrison: ' + pending.join(', '), 'adventurer');
+                            }
+                            if (tick > maxTicks) {
+                                clearInterval(iv);
+                                game.chatMessage('ATTACK_GRID: timeout waiting for all generals at garrison \u2014 proceeding anyway.', 'adventurer');
+                                onDone(false);
+                            }
+                        }, 1500);
+                    }
+
                     function agSendAttack() {
                         var sp = _qrFindSpecByUID(agSpecUID);
                         if (!sp) { finish('ATTACK_GRID: general not found during retry'); return; }
+                        // Final safety check: never attack if below minimum
+                        if (agMinKeys.length > 0) {
+                            var agSfFinal = agGetShortfall();
+                            if (agSfFinal.length > 0) {
+                                game.chatMessage('ATTACK_GRID: ABORT \u2014 ' + genName + ' below minimum (' + agSfFinal.join(', ') + '). Attack NOT sent.', 'adventurer');
+                                finish('ATTACK_GRID aborted: army below minimum');
+                                return false;
+                            }
+                        }
                         var stask = new armySpecTaskDef();
                         stask.uniqueID  = sp.GetUniqueID();
                         stask.subTaskID = 0;
                         game.gi.mCurrentCursor.mCurrentSpecialist = sp;
                         game.gi.SendServerAction(95, 5, agGrid, 0, stask);
+                        return true;
                     }
 
                     function agDoAttack() {
                         var agSpec0 = _qrFindSpecByUID(agSpecUID);
                         var agOrigGrid = agSpec0 ? agSpec0.GetGarrisonGridIdx() : -1;
-                        agSendAttack();
+                        var agHadTask0 = false;
+                        try { agHadTask0 = !!(agSpec0 && agSpec0.GetTask && agSpec0.GetTask()); } catch (e) {}
+                        if (agSendAttack() === false) { return; }
                         game.chatMessage('ATTACK_GRID: ' + genName + ' \u2192 grid:' + agGrid + ' (waiting for departure\u2026)', 'adventurer');
                         var agTicks = 0;
                         var ivAg = setInterval(function () {
                             if (state.stopped) { clearInterval(ivAg); return; }
                             try {
                                 var sp2 = _qrFindSpecByUID(agSpecUID);
-                                if (sp2 && sp2.GetGarrisonGridIdx() !== agOrigGrid) {
+                                var departed = false;
+                                if (sp2) {
+                                    // Departure indicators (any one is enough):
+                                    //  1) Garrison grid changed (rare for attacks but possible)
+                                    //  2) General no longer at a garrison (out on the map)
+                                    //  3) General now has a task (attack assigned/in progress)
+                                    if (sp2.GetGarrisonGridIdx() !== agOrigGrid) { departed = true; }
+                                    try { if (sp2.GetGarrison && sp2.GetGarrison() == null) { departed = true; } } catch (e) {}
+                                    try {
+                                        var t = sp2.GetTask && sp2.GetTask();
+                                        if (t && !agHadTask0) { departed = true; }
+                                    } catch (e) {}
+                                }
+                                if (departed) {
                                     clearInterval(ivAg);
                                     game.chatMessage('ATTACK_GRID: ' + genName + ' attack accepted.', 'adventurer');
                                     setTimeout(runNextStep, 500);
@@ -4899,10 +5046,27 @@ function _qrRunBattleScript(startIdx) {
                             agUnloadAll(function () {
                                 agLoadArmy(function () {
                                     var agSf1 = agGetShortfall();
-                                    if (agSf1.length > 0) {
-                                        game.chatMessage('ATTACK_GRID: still short (' + agSf1.join(', ') + ') \u2014 attacking anyway.', 'adventurer');
+                                    if (agSf1.length === 0) {
+                                        agDoAttack();
+                                        return;
                                     }
-                                    agDoAttack();
+                                    // Still short: wait for ALL profile generals to be at garrison, then full unload + retry
+                                    game.chatMessage('ATTACK_GRID: still short (' + agSf1.join(', ') + ') \u2014 waiting for all generals at garrison for full unload\u2026', 'adventurer');
+                                    agWaitAllAtGarrison(function () {
+                                        if (state.stopped) { return; }
+                                        game.chatMessage('ATTACK_GRID: all generals at garrison \u2014 full unload + reload retry\u2026', 'adventurer');
+                                        agUnloadAll(function () {
+                                            agLoadArmy(function () {
+                                                var agSf2 = agGetShortfall();
+                                                if (agSf2.length > 0) {
+                                                    game.chatMessage('ATTACK_GRID: ABORT \u2014 still short after full unload (' + agSf2.join(', ') + '). Attack NOT sent.', 'adventurer');
+                                                    finish('ATTACK_GRID aborted: army below minimum after full unload');
+                                                    return;
+                                                }
+                                                agDoAttack();
+                                            });
+                                        });
+                                    });
                                 });
                             });
                         }
