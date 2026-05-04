@@ -4797,45 +4797,162 @@ function _qrRunBattleScript(startIdx) {
                         game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' already at grid:' + mtgGrid + ' — skipping.', 'adventurer');
                         setTimeout(runNextStep, 1000); break;
                     }
-                    var mtgOrigGrid = spec.GetGarrisonGridIdx ? spec.GetGarrisonGridIdx() : 0;
-                    var mtgTask = new armySpecTaskDef();
-                    mtgTask.uniqueID  = spec.GetUniqueID();
-                    mtgTask.subTaskID = 0;
-                    game.gi.mCurrentCursor.mCurrentSpecialist = spec;
-                    game.gi.SendServerAction(95, 4, mtgGrid, 0, mtgTask);
-                    game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' \u2192 grid:' + mtgGrid, 'adventurer');
                     var mtgWaitArrival = !!step.waitArrival;
-                    // Poll until general has left original position (or arrived if waitArrival)
-                    setTimeout(function () {
-                        var mtgTick = 0;
-                        var mtgMaxTicks = mtgWaitArrival ? 90 : 15; // ~3min vs ~30s
-                        var mtgIv = setInterval(function () {
-                            if (state.stopped) { clearInterval(mtgIv); return; }
-                            mtgTick++;
-                            if (mtgTick > mtgMaxTicks) {
-                                clearInterval(mtgIv);
-                                game.chatMessage('MOVE_TO_GRID: timeout — ' + mtgGenName + ' did not ' + (mtgWaitArrival ? 'arrive' : 'move') + ' (grid may be blocked).', 'adventurer');
-                                setTimeout(runNextStep, 1000); return;
+                    var mtgMaxAttempts = 5;
+                    var mtgPhase = 1; // 1 = initial 5 tries, 2 = post-refresh 5 tries
+
+                    var mtgRefreshMap = function (onDone) {
+                        if (state.stopped) { return; }
+                        var advZoneId = game.gi.mCurrentViewedZoneID;
+                        var homeId;
+                        try { homeId = game.gi.mCurrentPlayer.GetHomeZoneId(); } catch (e) { homeId = 0; }
+                        if (!homeId || !advZoneId || homeId === advZoneId) {
+                            game.chatMessage('MOVE_TO_GRID: cannot refresh map (no home/adventure zone) — skipping refresh.', 'adventurer');
+                            onDone(); return;
+                        }
+                        game.chatMessage('MOVE_TO_GRID: refreshing map — going to home island…', 'adventurer');
+                        try { game.gi.visitZone(homeId); } catch (e) {
+                            game.chatMessage('MOVE_TO_GRID: visitZone(home) error: ' + e, 'adventurer');
+                            onDone(); return;
+                        }
+                        var rT = 0, rMax = 30; // ~60s
+                        var rIv = setInterval(function () {
+                            if (state.stopped) { clearInterval(rIv); return; }
+                            rT++;
+                            if (game.gi.mCurrentViewedZoneID === homeId) {
+                                clearInterval(rIv);
+                                game.chatMessage('MOVE_TO_GRID: on home island — returning to adventure…', 'adventurer');
+                                setTimeout(function () {
+                                    if (state.stopped) { return; }
+                                    try { game.gi.visitZone(advZoneId); } catch (e) {
+                                        game.chatMessage('MOVE_TO_GRID: visitZone(adv) error: ' + e, 'adventurer');
+                                        onDone(); return;
+                                    }
+                                    var bT = 0, bMax = 30;
+                                    var bIv = setInterval(function () {
+                                        if (state.stopped) { clearInterval(bIv); return; }
+                                        bT++;
+                                        if (game.gi.mCurrentViewedZoneID === advZoneId) {
+                                            clearInterval(bIv);
+                                            game.chatMessage('MOVE_TO_GRID: back on adventure map — retrying move.', 'adventurer');
+                                            setTimeout(onDone, 3000);
+                                            return;
+                                        }
+                                        if (bT > bMax) {
+                                            clearInterval(bIv);
+                                            game.chatMessage('MOVE_TO_GRID: timeout returning to adventure — retrying anyway.', 'adventurer');
+                                            onDone();
+                                        }
+                                    }, 2000);
+                                }, 3000);
+                                return;
                             }
-                            try {
-                                var s = _qrFindSpecByUID(mtgGenUID);
-                                if (!s) { return; }
-                                var curG = s.GetGarrisonGridIdx();
-                                // Arrival check works for both modes: if general is at target, we're done.
-                                if (curG === mtgGrid) {
-                                    clearInterval(mtgIv);
-                                    game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' is at grid:' + mtgGrid, 'adventurer');
-                                    setTimeout(runNextStep, 1000);
-                                    return;
-                                }
-                                if (!mtgWaitArrival && mtgOrigGrid > 0 && curG !== mtgOrigGrid) {
-                                    clearInterval(mtgIv);
-                                    game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' is moving to grid:' + mtgGrid, 'adventurer');
-                                    setTimeout(runNextStep, 1000);
-                                }
-                            } catch (e) { clearInterval(mtgIv); finish('MOVE_TO_GRID error: ' + e); }
+                            if (rT > rMax) {
+                                clearInterval(rIv);
+                                game.chatMessage('MOVE_TO_GRID: timeout reaching home island — retrying anyway.', 'adventurer');
+                                onDone();
+                            }
                         }, 2000);
-                    }, 2000);
+                    };
+
+                    var mtgAttempt = function (attemptNum) {
+                        var s0 = _qrFindSpecByUID(mtgGenUID);
+                        if (!s0) {
+                            game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' not found — skipping.', 'adventurer');
+                            setTimeout(runNextStep, 1000); return;
+                        }
+                        // Already arrived between attempts? done.
+                        if (s0.GetGarrisonGridIdx && s0.GetGarrisonGridIdx() === mtgGrid) {
+                            game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' arrived at grid:' + mtgGrid, 'adventurer');
+                            setTimeout(runNextStep, 1000); return;
+                        }
+                        var mtgOrigGrid = s0.GetGarrisonGridIdx ? s0.GetGarrisonGridIdx() : 0;
+                        var mtgTask = new armySpecTaskDef();
+                        mtgTask.uniqueID  = s0.GetUniqueID();
+                        mtgTask.subTaskID = 0;
+                        try { game.gi.mCurrentCursor.mCurrentSpecialist = s0; } catch (e) {}
+                        try { game.gi.SendServerAction(95, 4, mtgGrid, 0, mtgTask); } catch (e) {
+                            game.chatMessage('MOVE_TO_GRID send error: ' + e, 'adventurer');
+                        }
+                        game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' \u2192 grid:' + mtgGrid + ' (try ' + attemptNum + '/' + mtgMaxAttempts + ')', 'adventurer');
+
+                        setTimeout(function () {
+                            var mtgTick = 0;
+                            var mtgMaxTicks = 12; // ~24s to detect departure (started moving)
+                            var mtgIv = setInterval(function () {
+                                if (state.stopped) { clearInterval(mtgIv); return; }
+                                mtgTick++;
+                                try {
+                                    var s = _qrFindSpecByUID(mtgGenUID);
+                                    if (!s) {
+                                        clearInterval(mtgIv);
+                                        setTimeout(runNextStep, 1000); return;
+                                    }
+                                    var curG = s.GetGarrisonGridIdx();
+                                    // Arrival → done regardless of mode
+                                    if (curG === mtgGrid) {
+                                        clearInterval(mtgIv);
+                                        game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' is at grid:' + mtgGrid, 'adventurer');
+                                        setTimeout(runNextStep, 1000); return;
+                                    }
+                                    // Departure → started moving = attempt successful
+                                    if (mtgOrigGrid > 0 && curG !== mtgOrigGrid) {
+                                        clearInterval(mtgIv);
+                                        if (mtgWaitArrival) {
+                                            // Wait for arrival, no more retries since it's already moving
+                                            game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' moving — waiting for arrival at grid:' + mtgGrid, 'adventurer');
+                                            var aTick = 0, aMax = 90; // ~3min for arrival
+                                            var aIv = setInterval(function () {
+                                                if (state.stopped) { clearInterval(aIv); return; }
+                                                aTick++;
+                                                try {
+                                                    var ss = _qrFindSpecByUID(mtgGenUID);
+                                                    if (!ss) { clearInterval(aIv); setTimeout(runNextStep, 1000); return; }
+                                                    if (ss.GetGarrisonGridIdx() === mtgGrid) {
+                                                        clearInterval(aIv);
+                                                        game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' arrived at grid:' + mtgGrid, 'adventurer');
+                                                        setTimeout(runNextStep, 1000); return;
+                                                    }
+                                                    if (aTick > aMax) {
+                                                        clearInterval(aIv);
+                                                        game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' arrival timeout — continuing.', 'adventurer');
+                                                        setTimeout(runNextStep, 1000);
+                                                    }
+                                                } catch (e) { clearInterval(aIv); setTimeout(runNextStep, 1000); }
+                                            }, 2000);
+                                        } else {
+                                            game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' is moving to grid:' + mtgGrid, 'adventurer');
+                                            setTimeout(runNextStep, 1000);
+                                        }
+                                        return;
+                                    }
+                                    if (mtgTick > mtgMaxTicks) {
+                                        clearInterval(mtgIv);
+                                        if (attemptNum < mtgMaxAttempts) {
+                                            game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' did not start moving — retrying (phase ' + mtgPhase + ', try ' + (attemptNum + 1) + '/' + mtgMaxAttempts + ')', 'adventurer');
+                                            setTimeout(function () { mtgAttempt(attemptNum + 1); }, 4000);
+                                        } else if (mtgPhase === 1) {
+                                            game.chatMessage('MOVE_TO_GRID: ' + mtgGenName + ' failed ' + mtgMaxAttempts + ' tries — refreshing map then retrying.', 'adventurer');
+                                            mtgRefreshMap(function () {
+                                                if (state.stopped) { return; }
+                                                mtgPhase = 2;
+                                                mtgAttempt(1);
+                                            });
+                                        } else {
+                                            finish('MOVE_TO_GRID: ' + mtgGenName + ' failed to start moving after ' + (mtgMaxAttempts * 2) + ' tries (incl. map refresh) — stopping script.');
+                                        }
+                                        return;
+                                    }
+                                } catch (e) {
+                                    clearInterval(mtgIv);
+                                    game.chatMessage('MOVE_TO_GRID error: ' + e + ' — continuing.', 'adventurer');
+                                    setTimeout(runNextStep, 1000);
+                                }
+                            }, 2000);
+                        }, 2000);
+                    };
+
+                    mtgAttempt(1);
                     break;
                 }
 
