@@ -2388,14 +2388,22 @@ function _qrSendCoopInvites(profile, zoneId, callback) {
 
 // ---- Run profile ----
 function _qrRun() {
-    if (_qrRunning) { return; }
+    if (_qrRunning) {
+        game.chatMessage('Adventurer: _qrRun called but already running — skipped.', 'adventurer');
+        return;
+    }
 
-    if (!_qrProfile) { return; }
+    if (!_qrProfile) {
+        game.chatMessage('Adventurer: _qrRun called but no profile loaded — skipped.', 'adventurer');
+        return;
+    }
     var profile = _qrProfile;
 
     var errors = _qrValidate(profile);
     if (errors.length > 0) {
-        showGameAlert(_qrT('validationFailed') + '\n' + errors.join('\n'));
+        var msg = _qrT('validationFailed') + '\n' + errors.join('\n');
+        showGameAlert(msg);
+        errors.forEach(function (e) { game.chatMessage('Adventurer [VALIDATION]: ' + e, 'adventurer'); });
         return;
     }
 
@@ -2408,11 +2416,14 @@ function _qrRun() {
     _qrRunning = true;
     _qrModal.withFooter('.qrRunBtn').prop('disabled', true).text(_qrT('running'));
 
-    // Abort: restore button and optionally show an alert
+    // Abort: restore button, log to chat, and optionally show an alert
     function abortRun(msg) {
         _qrRunning = false;
         _qrModal.withFooter('.qrRunBtn').prop('disabled', false).text(_qrT('run'));
-        if (msg) { showGameAlert(msg); }
+        if (msg) {
+            showGameAlert(msg);
+            game.chatMessage('Adventurer [ABORT]: ' + msg, 'adventurer');
+        }
     }
 
     // Highlight a general step row red briefly
@@ -3841,7 +3852,23 @@ function _qrRunBattleScript(startIdx) {
                     _qrRepeatStatus = null;
                     _qrBsUpdateControls();
                     game.chatMessage('BattleScript: generals home \u2014 starting next run\u2026', 'adventurer');
-                    _qrRun();
+                    // _qrRun() validates isOnHomzone() — navigate home first if still on adventure island
+                    var rpHomeId;
+                    try { rpHomeId = game.gi.mCurrentPlayer.GetHomeZoneId(); } catch (e) { rpHomeId = 0; }
+                    if (rpHomeId && !game.gi.isOnHomzone()) {
+                        game.chatMessage('BattleScript: navigating to home island before next run\u2026', 'adventurer');
+                        try { game.gi.visitZone(rpHomeId); } catch (e) {}
+                        var rpNavT = 0;
+                        var rpNavIv = setInterval(function () {
+                            rpNavT++;
+                            if (game.gi.isOnHomzone() || rpNavT > 20) {
+                                clearInterval(rpNavIv);
+                                _qrRun();
+                            }
+                        }, 2000);
+                    } else {
+                        _qrRun();
+                    }
                 } else {
                     _qrRepeatStatus = '\uD83D\uDD01 Repeat: ' + st.ready + '/' + st.total + ' generals home' +
                         (elapsed > 0 ? ' (' + elapsed + 'min)' : '') + '\u2026';
@@ -5155,36 +5182,109 @@ function _qrRunBattleScript(startIdx) {
                     if (agMinKeys.length === 0) {
                         agDoAttack();
                     } else {
-                        var agSf0 = agGetShortfall();
-                        if (agSf0.length === 0) {
-                            agDoAttack();
-                        } else {
-                            game.chatMessage('ATTACK_GRID: ' + genName + ' below minimum (' + agSf0.join(', ') + ') \u2014 unloading all + reloading\u2026', 'adventurer');
+                        var agRefreshed = false;
+
+                        function agRefreshMap(onDone) {
+                            if (state.stopped) { return; }
+                            var advZoneId = game.gi.mCurrentViewedZoneID;
+                            var homeId;
+                            try { homeId = game.gi.mCurrentPlayer.GetHomeZoneId(); } catch (e) { homeId = 0; }
+                            if (!homeId || !advZoneId || homeId === advZoneId) {
+                                game.chatMessage('ATTACK_GRID: cannot refresh map (no home/adventure zone) \u2014 skipping refresh.', 'adventurer');
+                                onDone(); return;
+                            }
+                            game.chatMessage('ATTACK_GRID: refreshing map \u2014 going to home island\u2026', 'adventurer');
+                            try { game.gi.visitZone(homeId); } catch (e) {
+                                game.chatMessage('ATTACK_GRID: visitZone(home) error: ' + e, 'adventurer');
+                                onDone(); return;
+                            }
+                            var rT = 0, rMax = 30;
+                            var rIv = setInterval(function () {
+                                if (state.stopped) { clearInterval(rIv); return; }
+                                rT++;
+                                if (game.gi.mCurrentViewedZoneID === homeId) {
+                                    clearInterval(rIv);
+                                    game.chatMessage('ATTACK_GRID: on home island \u2014 returning to adventure\u2026', 'adventurer');
+                                    setTimeout(function () {
+                                        if (state.stopped) { return; }
+                                        try { game.gi.visitZone(advZoneId); } catch (e) {
+                                            game.chatMessage('ATTACK_GRID: visitZone(adv) error: ' + e, 'adventurer');
+                                            onDone(); return;
+                                        }
+                                        var bT = 0, bMax = 30;
+                                        var bIv = setInterval(function () {
+                                            if (state.stopped) { clearInterval(bIv); return; }
+                                            bT++;
+                                            if (game.gi.mCurrentViewedZoneID === advZoneId) {
+                                                clearInterval(bIv);
+                                                game.chatMessage('ATTACK_GRID: back on adventure map \u2014 retrying army.', 'adventurer');
+                                                setTimeout(onDone, 3000);
+                                                return;
+                                            }
+                                            if (bT > bMax) {
+                                                clearInterval(bIv);
+                                                game.chatMessage('ATTACK_GRID: timeout returning to adventure \u2014 retrying anyway.', 'adventurer');
+                                                onDone();
+                                            }
+                                        }, 2000);
+                                    }, 3000);
+                                    return;
+                                }
+                                if (rT > rMax) {
+                                    clearInterval(rIv);
+                                    game.chatMessage('ATTACK_GRID: timeout reaching home island \u2014 retrying anyway.', 'adventurer');
+                                    onDone();
+                                }
+                            }, 2000);
+                        }
+
+                        // Phase: do quick unload+reload; if still short, full-unload retry; if still short,
+                        // refresh map (once) and re-run the whole unload sequence; only then abort.
+                        function agTryUnloadSequence(onResult) {
                             agUnloadAll(function () {
                                 agLoadArmy(function () {
-                                    var agSf1 = agGetShortfall();
-                                    if (agSf1.length === 0) {
-                                        agDoAttack();
-                                        return;
-                                    }
-                                    // Still short: wait for ALL profile generals to be at garrison, then full unload + retry
-                                    game.chatMessage('ATTACK_GRID: still short (' + agSf1.join(', ') + ') \u2014 waiting for all generals at garrison for full unload\u2026', 'adventurer');
+                                    var sf1 = agGetShortfall();
+                                    if (sf1.length === 0) { onResult(true); return; }
+                                    game.chatMessage('ATTACK_GRID: still short (' + sf1.join(', ') + ') \u2014 waiting for all generals at garrison for full unload\u2026', 'adventurer');
                                     agWaitAllAtGarrison(function () {
                                         if (state.stopped) { return; }
                                         game.chatMessage('ATTACK_GRID: all generals at garrison \u2014 full unload + reload retry\u2026', 'adventurer');
                                         agUnloadAll(function () {
                                             agLoadArmy(function () {
-                                                var agSf2 = agGetShortfall();
-                                                if (agSf2.length > 0) {
-                                                    game.chatMessage('ATTACK_GRID: ABORT \u2014 still short after full unload (' + agSf2.join(', ') + '). Attack NOT sent.', 'adventurer');
-                                                    finish('ATTACK_GRID aborted: army below minimum after full unload');
-                                                    return;
-                                                }
-                                                agDoAttack();
+                                                var sf2 = agGetShortfall();
+                                                onResult(sf2.length === 0, sf2);
                                             });
                                         });
                                     });
                                 });
+                            });
+                        }
+
+                        var agSf0 = agGetShortfall();
+                        if (agSf0.length === 0) {
+                            agDoAttack();
+                        } else {
+                            game.chatMessage('ATTACK_GRID: ' + genName + ' below minimum (' + agSf0.join(', ') + ') \u2014 unloading all + reloading\u2026', 'adventurer');
+                            agTryUnloadSequence(function (ok, sf) {
+                                if (ok) { agDoAttack(); return; }
+                                if (!agRefreshed) {
+                                    agRefreshed = true;
+                                    game.chatMessage('ATTACK_GRID: still short after full unload (' + (sf || []).join(', ') + ') \u2014 refreshing map and retrying once more\u2026', 'adventurer');
+                                    agRefreshMap(function () {
+                                        if (state.stopped) { return; }
+                                        // After refresh, check shortfall directly first
+                                        var sfAfter = agGetShortfall();
+                                        if (sfAfter.length === 0) { agDoAttack(); return; }
+                                        agTryUnloadSequence(function (ok2, sf2) {
+                                            if (ok2) { agDoAttack(); return; }
+                                            game.chatMessage('ATTACK_GRID: ABORT \u2014 still short after map refresh + full unload (' + (sf2 || []).join(', ') + '). Attack NOT sent.', 'adventurer');
+                                            finish('ATTACK_GRID aborted: army below minimum after map refresh');
+                                        });
+                                    });
+                                } else {
+                                    game.chatMessage('ATTACK_GRID: ABORT \u2014 still short after full unload (' + (sf || []).join(', ') + '). Attack NOT sent.', 'adventurer');
+                                    finish('ATTACK_GRID aborted: army below minimum after full unload');
+                                }
                             });
                         }
                     }
